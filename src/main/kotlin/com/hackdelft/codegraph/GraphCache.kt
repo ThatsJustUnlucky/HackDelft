@@ -33,7 +33,7 @@ class GraphCache(project: Project) {
     val nodes = d.nodes.joinToString(",") { n ->
       """{"id":"${n.id.e()}","label":"${n.label.e()}","type":"${n.type}","filePath":"${n.filePath.e()}","color":"${n.color}","folder":"${n.folder.e()}"}"""
     }
-    val edges = d.edges.joinToString(",") { e ->
+    val edges = d.edges.filter { it.type != "calls" || it.methodCalls.isNotEmpty() }.joinToString(",") { e ->
       val calls = e.methodCalls.joinToString(",") { c ->
         """{"callerMethod":"${c.callerMethod.e()}","targetMethod":"${c.targetMethod.e()}","callerFile":"${c.callerFile.e()}","targetFile":"${c.targetFile.e()}","callerLine":${c.callerLine},"targetLine":${c.targetLine}}"""
       }
@@ -71,7 +71,7 @@ class GraphCache(project: Project) {
         o.get("color")?.takeIf { c -> !c.isJsonNull }?.asString ?: "",
         calls
       )
-    }
+    }.filter { it.type != "calls" || it.methodCalls.isNotEmpty() }
     return GraphData(nodes, edges)
   }
 

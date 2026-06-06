@@ -199,7 +199,7 @@ class CodeGraphPanel(private val project: Project) {
     val nodes = data.nodes.joinToString(",") { n ->
       """{"data":{"id":"${n.id.e()}","label":"${n.label.e()}","type":"${n.type}","fp":"${n.filePath.e()}","folder":"${n.folder.e()}","color":"${n.color}"}}"""
     }
-    val edges = data.edges.mapIndexed { i, e ->
+    val edges = data.edges.filter { it.type != "calls" || it.methodCalls.isNotEmpty() }.mapIndexed { i, e ->
       val calls = e.methodCalls.joinToString(",") { c ->
         """{"callerMethod":"${c.callerMethod.e()}","targetMethod":"${c.targetMethod.e()}","callerFile":"${c.callerFile.e()}","targetFile":"${c.targetFile.e()}","callerLine":${c.callerLine},"targetLine":${c.targetLine}}"""
       }
