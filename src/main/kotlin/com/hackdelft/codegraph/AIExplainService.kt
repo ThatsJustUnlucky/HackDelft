@@ -22,8 +22,9 @@ class AIExplainService {
       "input", "validation", "processing", "persistence",
       "external-call", "ui", "error-handling", "test", "orchestration", "unknown"
     )
-    private const val MODEL = "gpt-5.5"
-    private const val REASONING_EFFORT = "medium"
+    private const val EXPLANATION_MODEL = "gpt-5.5"
+    private const val EXPLANATION_REASONING_EFFORT = "high"
+    private const val TYPE_MODEL = "gpt-5.4-nano"
     private const val ENDPOINT = "https://api.openai.com/v1/chat/completions"
   }
 
@@ -33,8 +34,9 @@ class AIExplainService {
   fun explain(selectedId: String, focused: GraphData, snippets: Map<String, String>): AIExplanationResponse {
     val key = apiKey ?: return mock(selectedId, focused)
     return try {
-      val content = callOpenAI(key, buildPrompt(selectedId, focused, snippets))
-      validate(parse(content), focused, selectedId)
+      val explanation = parse(callExplanationModel(key, buildPrompt(selectedId, focused, snippets)))
+      val typed = classifyStepTypes(key, explanation, focused, selectedId)
+      validate(typed, focused, selectedId)
     } catch (_: Exception) {
       mock(selectedId, focused)
     }
@@ -53,9 +55,7 @@ Only use the provided nodes, edges, and snippets. Do not invent files, functions
 Return JSON only.
 
 Create a short (3-6) step-by-step explanation of how the selected node interacts with the rest of the focused graph.
-
-Allowed step types: ${ALLOWED_TYPES.joinToString(", ")}
-If no type fits, use "unknown".
+Set every step type to "unknown". A separate lightweight classifier will assign step types.
 
 Respond with a JSON object of this shape:
 {"summary": string, "steps": [{"id": string, "title": string, "type": string, "explanation": string, "focusNodes": [existing node ids only], "focusEdges": []}], "riskNotes": [string], "suggestedNextNodes": [existing node ids]}
@@ -77,13 +77,44 @@ $snipStr
 
   // --- OpenAI call ---
 
-  private fun callOpenAI(key: String, prompt: String): String {
-    val body = """{"model":"$MODEL","reasoning_effort":"$REASONING_EFFORT","temperature":0.2,"response_format":{"type":"json_object"},"messages":[{"role":"system","content":"You are a precise code explanation assistant that returns only valid JSON."},{"role":"user","content":"${prompt.j()}"}]}"""
+  private fun callExplanationModel(key: String, prompt: String): String =
+    callOpenAI(
+      key = key,
+      model = EXPLANATION_MODEL,
+      reasoningEffort = EXPLANATION_REASONING_EFFORT,
+      temperature = "0.2",
+      timeout = Duration.ofSeconds(60),
+      systemMessage = "You are a precise code explanation assistant that returns only valid JSON.",
+      prompt = prompt
+    )
+
+  private fun callTypeModel(key: String, prompt: String): String =
+    callOpenAI(
+      key = key,
+      model = TYPE_MODEL,
+      reasoningEffort = null,
+      temperature = "0.0",
+      timeout = Duration.ofSeconds(20),
+      systemMessage = "You classify explanation steps into an allowed taxonomy and return only valid JSON.",
+      prompt = prompt
+    )
+
+  private fun callOpenAI(
+    key: String,
+    model: String,
+    reasoningEffort: String?,
+    temperature: String,
+    timeout: Duration,
+    systemMessage: String,
+    prompt: String
+  ): String {
+    val reasoningField = reasoningEffort?.let { ""","reasoning_effort":"${it.j()}"""" } ?: ""
+    val body = """{"model":"${model.j()}"$reasoningField,"temperature":$temperature,"response_format":{"type":"json_object"},"messages":[{"role":"system","content":"${systemMessage.j()}"},{"role":"user","content":"${prompt.j()}"}]}"""
     val req = HttpRequest.newBuilder()
       .uri(URI.create(ENDPOINT))
       .header("Authorization", "Bearer $key")
       .header("Content-Type", "application/json")
-      .timeout(Duration.ofSeconds(45))
+      .timeout(timeout)
       .POST(HttpRequest.BodyPublishers.ofString(body, Charsets.UTF_8))
       .build()
     val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
@@ -91,6 +122,58 @@ $snipStr
     return JsonParser.parseString(resp.body()).asJsonObject
       .getAsJsonArray("choices").get(0).asJsonObject
       .getAsJsonObject("message").get("content").asString
+  }
+
+  private fun classifyStepTypes(
+    key: String,
+    response: AIExplanationResponse,
+    focused: GraphData,
+    selectedId: String
+  ): AIExplanationResponse {
+    if (response.steps.isEmpty()) return response
+    val choices = try {
+      parseTypeChoices(callTypeModel(key, buildTypePrompt(response, focused, selectedId)))
+    } catch (_: Exception) {
+      emptyMap()
+    }
+    if (choices.isEmpty()) return response
+    return response.copy(
+      steps = response.steps.map { step ->
+        step.copy(type = choices[step.id]?.takeIf { ALLOWED_TYPES.contains(it) } ?: "unknown")
+      }
+    )
+  }
+
+  private fun buildTypePrompt(response: AIExplanationResponse, focused: GraphData, selectedId: String): String {
+    val selected = focused.nodes.find { it.id == selectedId }
+    val nodeLabels = focused.nodes.associate { it.id to "${it.type} ${it.label}" }
+    val steps = response.steps.joinToString(",") { step ->
+      val focus = step.focusNodes.joinToString(",") { id -> """"${id.j()}":"${(nodeLabels[id] ?: id).j()}"""" }
+      """{"id":"${step.id.j()}","title":"${step.title.j()}","explanation":"${step.explanation.j()}","focusNodes":{$focus}}"""
+    }
+    return """
+Assign exactly one type to each explanation step.
+Allowed step types: ${ALLOWED_TYPES.joinToString(", ")}
+If no type fits, use "unknown".
+
+Selected node: ${selected?.let { "${it.type} \"${it.label}\" (id=${it.id})" } ?: selectedId}
+
+Steps: [$steps]
+
+Return JSON only:
+{"steps":[{"id":"existing step id","type":"one allowed step type"}]}
+""".trim()
+  }
+
+  private fun parseTypeChoices(json: String): Map<String, String> {
+    val root = JsonParser.parseString(json).asJsonObject
+    val arr = root.getAsJsonArray("steps") ?: root.getAsJsonArray("types") ?: return emptyMap()
+    return arr.mapNotNull { el ->
+      val o = el.asJsonObject
+      val id = o.str("id")
+      val type = o.str("type")
+      if (id == null || type == null) null else id to type
+    }.toMap()
   }
 
   // --- parsing + validation ---
