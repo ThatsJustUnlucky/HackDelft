@@ -8,8 +8,10 @@ data class AIExplanationStep(
   val title: String,
   val type: String,
   val explanation: String,
+  val detail: String,
   val focusNodes: List<String>,
-  val focusEdges: List<String> = emptyList()
+  val focusEdges: List<String> = emptyList(),
+  val focusMethod: String = ""
 )
 
 data class AIExplanationResponse(

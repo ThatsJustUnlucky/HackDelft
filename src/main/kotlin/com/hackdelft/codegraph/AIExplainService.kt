@@ -31,15 +31,22 @@ class AIExplainService(private val projectBasePath: String? = null) {
   private val apiKey: String? = loadApiKey()
   private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build()
 
-  fun explain(selectedId: String, focused: GraphData, snippets: Map<String, String>): AIExplanationResponse {
-    val key = apiKey ?: return mock(selectedId, focused)
-    return try {
+  fun explain(
+    selectedId: String,
+    focused: GraphData,
+    snippets: Map<String, String>,
+    anchorId: String? = null
+  ): AIExplanationResponse {
+    val key = apiKey
+    val raw = if (key == null) mock(selectedId, focused)
+    else try {
       val explanation = parse(callExplanationModel(key, buildPrompt(selectedId, focused, snippets)))
       val typed = classifyStepTypes(key, explanation, focused, selectedId)
       validate(typed, focused, selectedId)
     } catch (e: Exception) {
       mock(selectedId, focused, "OpenAI request failed: ${e.message ?: e.javaClass.simpleName}")
     }
+    return pinAnchorAndSingleFile(raw, focused, anchorId, selectedId)
   }
 
   // --- prompt ---
@@ -54,11 +61,22 @@ The graph was extracted deterministically from the IDE.
 Only use the provided nodes, edges, and snippets. Do not invent files, functions, or dependencies.
 Return JSON only.
 
-Create a short (3-6) step-by-step explanation of how the selected node interacts with the rest of the focused graph.
+Create a step-by-step explanation that walks through what the selected method does, one call at a time.
 Set every step type to "unknown". A separate lightweight classifier will assign step types.
 
+The selected node is a method; every node in the focused graph is a file, and the graph edges list method-level calls (callerMethod -> targetMethod).
+Build the walkthrough like this:
+- Step 1 is an overview, focused on the file that contains the selected method (its home file).
+- Create one step for EACH method call the selected method makes (the calls where callerMethod is the selected method), in execution order. Focus each such step on the file that contains the called function. Two calls into the same file must still be two separate steps.
+- You may add extra steps for significant logic that is not a call (for example input handling or orchestration); focus those on the home file.
+- Each step's focusNodes must contain exactly one file id: the called function's file, or the home file for overview/logic steps.
+
+For each step, include:
+- explanation: one short sentence for the step list
+- detail: a fuller explanation shown when the user clicks the step
+
 Respond with a JSON object of this shape:
-{"summary": string, "steps": [{"id": string, "title": string, "type": string, "explanation": string, "focusNodes": [existing node ids only], "focusEdges": []}], "riskNotes": [string], "suggestedNextNodes": [existing node ids]}
+{"summary": string, "steps": [{"id": string, "title": string, "type": string, "explanation": string, "detail": string, "focusNodes": [existing node ids only], "focusEdges": []}], "riskNotes": [string], "suggestedNextNodes": [existing node ids]}
 
 Selected node: $selStr
 
@@ -70,8 +88,13 @@ $snipStr
   }
 
   private fun graphToJson(d: GraphData): String {
-    val nodes = d.nodes.joinToString(",") { """{"id":"${it.id.j()}","label":"${it.label.j()}","type":"${it.type}"}""" }
-    val edges = d.edges.joinToString(",") { """{"source":"${it.source.j()}","target":"${it.target.j()}","type":"${it.type}"}""" }
+    val nodes = d.nodes.joinToString(",") { """{"id":"${it.id.j()}","label":"${it.label.j()}","type":"${it.type}","folder":"${it.folder.j()}"}""" }
+    val edges = d.edges.joinToString(",") { edge ->
+      val calls = edge.methodCalls.take(20).joinToString(",") { call ->
+        """{"callerMethod":"${call.callerMethod.j()}","targetMethod":"${call.targetMethod.j()}","callerLine":${call.callerLine},"targetLine":${call.targetLine}}"""
+      }
+      """{"source":"${edge.source.j()}","target":"${edge.target.j()}","type":"${edge.type}","methodCalls":[$calls]}"""
+    }
     return """{"nodes":[$nodes],"edges":[$edges]}"""
   }
 
@@ -82,7 +105,7 @@ $snipStr
       key = key,
       model = EXPLANATION_MODEL,
       reasoningEffort = EXPLANATION_REASONING_EFFORT,
-      timeout = Duration.ofSeconds(60),
+      timeout = Duration.ofSeconds(240),
       systemMessage = "You are a precise code explanation assistant that returns only valid JSON.",
       prompt = prompt
     )
@@ -146,7 +169,7 @@ $snipStr
     val nodeLabels = focused.nodes.associate { it.id to "${it.type} ${it.label}" }
     val steps = response.steps.joinToString(",") { step ->
       val focus = step.focusNodes.joinToString(",") { id -> """"${id.j()}":"${(nodeLabels[id] ?: id).j()}"""" }
-      """{"id":"${step.id.j()}","title":"${step.title.j()}","explanation":"${step.explanation.j()}","focusNodes":{$focus}}"""
+      """{"id":"${step.id.j()}","title":"${step.title.j()}","explanation":"${step.explanation.j()}","detail":"${step.detail.j()}","focusNodes":{$focus}}"""
     }
     return """
 Assign exactly one type to each explanation step.
@@ -184,6 +207,7 @@ Return JSON only:
         title = o.str("title") ?: "Step ${i + 1}",
         type = o.str("type") ?: "unknown",
         explanation = o.str("explanation") ?: "",
+        detail = o.str("detail") ?: o.str("explanation") ?: "",
         focusNodes = o.arr("focusNodes")
       )
     } ?: emptyList()
@@ -204,6 +228,7 @@ Return JSON only:
         title = s.title,
         type = if (ALLOWED_TYPES.contains(s.type)) s.type else "unknown",
         explanation = s.explanation,
+        detail = s.detail,
         focusNodes = s.focusNodes.filter { ids.contains(it) }.ifEmpty { listOf(fallbackNode) }
       )
     }
@@ -215,6 +240,39 @@ Return JSON only:
     )
   }
 
+  // Shape the walkthrough: step 1 pins the anchor (the selected method's home file); every other
+  // step is reduced to the single file it is about (the called function's file, or the home file
+  // for non-call/logic steps). Files MAY repeat across steps, because each method call is its own
+  // step even when several calls land in the same file.
+  private fun pinAnchorAndSingleFile(
+    response: AIExplanationResponse,
+    focused: GraphData,
+    anchorId: String?,
+    selectedId: String
+  ): AIExplanationResponse {
+    if (response.steps.isEmpty()) return response
+    val ids = focused.nodes.map { it.id }.toSet()
+    val anchor = anchorId?.takeIf { ids.contains(it) } ?: focused.nodes.firstOrNull()?.id ?: return response
+    // Queue of target methods the selected method calls, keyed by the target file node id, so each
+    // step can be matched to a concrete called method (the step-by-step connection runs on methods).
+    val callsByFile = LinkedHashMap<String, ArrayDeque<String>>()
+    for (e in focused.edges) for (c in e.methodCalls) if (c.callerMethod == selectedId) {
+      callsByFile.getOrPut(e.target) { ArrayDeque() }.addLast(c.targetMethod)
+    }
+    val steps = response.steps.mapIndexed { index, step ->
+      if (index == 0) {
+        step.copy(focusNodes = listOf(anchor), focusMethod = selectedId)
+      } else {
+        val file = step.focusNodes.firstOrNull { ids.contains(it) && it != anchor }
+          ?: step.focusNodes.firstOrNull { ids.contains(it) }
+          ?: anchor
+        val method = callsByFile[file]?.removeFirstOrNull() ?: selectedId
+        step.copy(focusNodes = listOf(file), focusMethod = method)
+      }
+    }
+    return response.copy(steps = steps)
+  }
+
   // --- offline fallback ---
 
   private fun mock(
@@ -224,22 +282,27 @@ Return JSON only:
   ): AIExplanationResponse {
     val byId = focused.nodes.associateBy { it.id }
     val sel = byId[selectedId]
+    val focusId = if (byId.containsKey(selectedId)) selectedId else (focused.nodes.firstOrNull()?.id ?: selectedId)
     val selLabel = sel?.label ?: selectedId
     val neighbors = focused.edges
-      .filter { it.source == selectedId || it.target == selectedId }
-      .map { if (it.source == selectedId) it.target else it.source }
+      .filter { it.source == focusId || it.target == focusId }
+      .map { if (it.source == focusId) it.target else it.source }
       .distinct()
 
     val steps = mutableListOf(
       AIExplanationStep("step-1", "Entry point", "orchestration",
-        "$selLabel is the focus of this view.", listOf(selectedId))
+        "$selLabel is the focus of this view.",
+        "CodeMap is showing an offline explanation because the AI call is unavailable. This selected method or file is the starting point for the focused walkthrough.",
+        listOf(focusId))
     )
     val cycle = listOf("processing", "external-call", "persistence", "validation", "ui")
     neighbors.take(4).forEachIndexed { i, nId ->
       val n = byId[nId] ?: return@forEachIndexed
       steps += AIExplanationStep(
         "step-${i + 2}", n.label, cycle[i % cycle.size],
-        "$selLabel is connected to ${n.label}.", listOf(selectedId, nId)
+        "$selLabel is connected to ${n.label}.",
+        "The deterministic graph found a connection between $selLabel and ${n.label}. Use the graph highlight to inspect the related file or method.",
+        listOf(focusId, nId)
       )
     }
     return AIExplanationResponse(

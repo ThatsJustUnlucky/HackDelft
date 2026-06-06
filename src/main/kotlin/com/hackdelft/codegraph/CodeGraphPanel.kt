@@ -9,6 +9,7 @@ import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.pom.Navigatable
 import com.intellij.psi.JavaPsiFacade
 import com.intellij.psi.PsiElement
+import com.intellij.psi.PsiManager
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
@@ -62,7 +63,7 @@ class CodeGraphPanel(private val project: Project) {
   }
 
   fun focusNode(nodeId: String) {
-    val escaped = nodeId.e()
+    val escaped = (graphNodeId(nodeId) ?: nodeId).e()
     browser.cefBrowser.executeJavaScript("focusNode(\"$escaped\");", "", 0)
   }
 
@@ -81,11 +82,16 @@ class CodeGraphPanel(private val project: Project) {
     bg.submit {
       try {
         val full = currentGraph ?: extractAndCache().also { currentGraph = it }
-        val focused = FocusedSubgraphExtractor.extract(full, nodeId)
-        val snippets = collectSnippets(focused)
-        val response = aiService.explain(nodeId, focused, snippets)
+        val filePath = methodFilePath(nodeId)
+        val focused = FocusedSubgraphExtractor.extract(full, nodeId, filePath)
+        val snippets = collectSnippets(focused, nodeId)
+        val anchorId = if (nodeId.startsWith("file:")) nodeId else filePath?.let { "file:$it" }
+        val response = aiService.explain(nodeId, focused, snippets, anchorId)
+        // Add the used-method overlay (visible only during the step view), then show the steps.
+        // showExplanation auto-plays step 0 (anchor-only highlight + camera fit).
+        // Don't call focusNode here: it re-lights the node's neighbors and overrides the step highlight.
+        browser.cefBrowser.executeJavaScript("setStepMethods(${methodSubgraphJson(focused, nodeId, anchorId)});", "", 0)
         browser.cefBrowser.executeJavaScript("showExplanation(${explanationToJson(response)});", "", 0)
-        focusNode(nodeId)
       } catch (_: Exception) {}
     }
   }
@@ -101,15 +107,28 @@ class CodeGraphPanel(private val project: Project) {
     }
   }
 
-  private fun collectSnippets(focused: GraphData): Map<String, String> =
+  private fun collectSnippets(focused: GraphData, selectedId: String): Map<String, String> =
     ReadAction.compute<Map<String, String>, Exception> {
       val out = LinkedHashMap<String, String>()
-      for (n in focused.nodes.take(8)) {
-        val text = resolvePsi(n.id)?.text ?: continue
-        out[n.id] = text.take(600)
+      putSnippet(out, selectedId)
+      focused.edges.asSequence()
+        .flatMap { it.methodCalls.asSequence() }
+        .flatMap { sequenceOf(it.callerMethod, it.targetMethod) }
+        .distinct()
+        .take(10)
+        .forEach { putSnippet(out, it) }
+      for (n in focused.nodes.take(4)) {
+        if (out.size >= 12) break
+        putSnippet(out, n.id)
       }
       out
     }
+
+  private fun putSnippet(out: MutableMap<String, String>, id: String) {
+    if (out.containsKey(id)) return
+    val text = resolvePsi(id)?.text ?: return
+    out[id] = text.take(800)
+  }
 
   private fun resolvePsi(nodeId: String): PsiElement? {
     val facade = JavaPsiFacade.getInstance(project)
@@ -123,6 +142,10 @@ class CodeGraphPanel(private val project: Project) {
         else facade.findClass(rest.substring(0, dot), scope)
           ?.findMethodsByName(rest.substring(dot + 1), false)?.firstOrNull()
       }
+      nodeId.startsWith("file:") -> {
+        val vf = LocalFileSystem.getInstance().findFileByPath(nodeId.removePrefix("file:")) ?: return null
+        PsiManager.getInstance(project).findFile(vf)
+      }
       else -> null
     }
   }
@@ -130,11 +153,37 @@ class CodeGraphPanel(private val project: Project) {
   private fun explanationToJson(r: AIExplanationResponse): String {
     val steps = r.steps.joinToString(",") { s ->
       val fn = s.focusNodes.joinToString(",") { "\"${it.e()}\"" }
-      """{"id":"${s.id.e()}","title":"${s.title.e()}","type":"${s.type.e()}","explanation":"${s.explanation.e()}","focusNodes":[$fn]}"""
+      """{"id":"${s.id.e()}","title":"${s.title.e()}","type":"${s.type.e()}","explanation":"${s.explanation.e()}","detail":"${s.detail.e()}","focusNodes":[$fn],"focusMethod":"${s.focusMethod.e()}"}"""
     }
     val risks = r.riskNotes.joinToString(",") { "\"${it.e()}\"" }
     return """{"summary":"${r.summary.e()}","steps":[$steps],"riskNotes":[$risks]}"""
   }
+
+  /** Used-method overlay for the step view: the selected method + the (cross-file) methods it calls. */
+  private fun methodSubgraphJson(focused: GraphData, selectedId: String, anchorId: String?): String {
+    val fileColor = focused.nodes.associate { it.id to it.color }
+    val methods = LinkedHashMap<String, Triple<String, String, String>>() // id -> (label, fileNodeId, color)
+    val edges = LinkedHashSet<Pair<String, String>>()
+    if (anchorId != null && fileColor.containsKey(anchorId)) {
+      methods[selectedId] = Triple(methodLabel(selectedId), anchorId, fileColor[anchorId] ?: "")
+    }
+    for (e in focused.edges) {
+      for (c in e.methodCalls) {
+        if (c.callerMethod != selectedId) continue
+        methods.getOrPut(c.callerMethod) { Triple(methodLabel(c.callerMethod), e.source, fileColor[e.source] ?: "") }
+        methods.getOrPut(c.targetMethod) { Triple(methodLabel(c.targetMethod), e.target, fileColor[e.target] ?: "") }
+        edges += c.callerMethod to c.targetMethod
+      }
+    }
+    val methodsJson = methods.entries.joinToString(",") { (id, t) ->
+      """{"id":"${id.e()}","label":"${t.first.e()}","file":"${t.second.e()}","color":"${t.third}"}"""
+    }
+    val edgesJson = edges.joinToString(",") { (s, t) -> """{"source":"${s.e()}","target":"${t.e()}"}""" }
+    return """{"methods":[$methodsJson],"edges":[$edgesJson]}"""
+  }
+
+  private fun methodLabel(methodId: String): String =
+    methodId.removePrefix("method:").substringAfterLast('.')
 
   private fun navigateTo(nodeId: String) {
     bg.submit {
@@ -168,19 +217,37 @@ class CodeGraphPanel(private val project: Project) {
         cls.findMethodsByName(rest.substring(dot + 1), false).firstOrNull() as? Navigatable
       }
 
+      nodeId.startsWith("file:") -> {
+        val vf = LocalFileSystem.getInstance().findFileByPath(nodeId.removePrefix("file:")) ?: return null
+        PsiManager.getInstance(project).findFile(vf) as? Navigatable
+      }
+
       else -> null
     }
   }
 
   private fun toJson(data: GraphData): String {
     val nodes = data.nodes.joinToString(",") { n ->
-      """{"data":{"id":"${n.id.e()}","label":"${n.label.e()}","type":"${n.type}","fp":"${n.filePath.e()}","color":"${n.color}"}}"""
+      """{"data":{"id":"${n.id.e()}","label":"${n.label.e()}","type":"${n.type}","fp":"${n.filePath.e()}","folder":"${n.folder.e()}","color":"${n.color}"}}"""
     }
-    val edges = data.edges.mapIndexed { i, e ->
-      """{"data":{"id":"e$i","source":"${e.source.e()}","target":"${e.target.e()}","type":"${e.type}","color":"${e.color}"}}"""
+    val edges = data.edges.filter { it.type != "calls" || it.methodCalls.isNotEmpty() }.mapIndexed { i, e ->
+      val calls = e.methodCalls.joinToString(",") { c ->
+        """{"callerMethod":"${c.callerMethod.e()}","targetMethod":"${c.targetMethod.e()}","callerFile":"${c.callerFile.e()}","targetFile":"${c.targetFile.e()}","callerLine":${c.callerLine},"targetLine":${c.targetLine}}"""
+      }
+      """{"data":{"id":"e$i","source":"${e.source.e()}","target":"${e.target.e()}","type":"${e.type}","color":"${e.color}","methodCalls":[$calls]}}"""
     }.joinToString(",")
     return """{"nodes":[$nodes],"edges":[$edges]}"""
   }
+
+  private fun graphNodeId(nodeId: String): String? {
+    if (nodeId.startsWith("file:")) return nodeId
+    return methodFilePath(nodeId)?.let { "file:$it" }
+  }
+
+  private fun methodFilePath(nodeId: String): String? =
+    if (nodeId.startsWith("method:")) {
+      ReadAction.compute<String?, Exception> { resolvePsi(nodeId)?.containingFile?.virtualFile?.path?.replace('\\', '/') }
+    } else null
 
   private fun String.e() = replace("\\", "\\\\").replace("\"", "\\\"")
     .replace("\n", "\\n").replace("\r", "")
@@ -207,8 +274,6 @@ body{display:flex;flex-direction:column}
 .legend{display:flex;align-items:center;gap:5px;color:#565f89;font-size:11px}
 .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 .dash{width:16px;height:3px;border-radius:2px;flex-shrink:0}
-#btn-explain{border-color:#bb9af7;color:#bb9af7}
-#btn-explain:hover{background:#2a1f3d}
 #steppanel{position:fixed;top:52px;right:0;bottom:32px;width:340px;background:#16161e;border-left:1px solid #2a2b3d;display:flex;flex-direction:column;z-index:10;box-shadow:-4px 0 16px rgba(0,0,0,.35)}
 #steppanel.hidden{display:none}
 #sp-head{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #2a2b3d}
@@ -216,6 +281,7 @@ body{display:flex;flex-direction:column}
 .sp-x{background:none;border:none;color:#565f89;cursor:pointer;font-size:14px}
 .sp-x:hover{color:#f7768e}
 #sp-summary{flex-shrink:0;padding:12px 14px;color:#a9b1d6;font-size:12px;line-height:1.5;border-bottom:1px solid #2a2b3d}
+#sp-detail{flex-shrink:0;padding:12px 14px;color:#c0caf5;font-size:12px;line-height:1.5;border-bottom:1px solid #2a2b3d;max-height:150px;overflow:auto}
 #sp-steps{flex:1;overflow:auto;padding:8px}
 .sp-step{background:#1e1f2e;border:1px solid #2a2b3d;border-radius:8px;padding:10px;margin-bottom:8px;cursor:pointer;transition:all .15s}
 .sp-step:hover{border-color:#7aa2f7}
@@ -228,14 +294,24 @@ body{display:flex;flex-direction:column}
 #sp-risks:empty{display:none}
 #sp-actions{flex-shrink:0;padding:10px 14px;border-top:1px solid #2a2b3d}
 #sp-actions .btn{width:100%}
+#methodpanel{position:fixed;top:52px;right:0;bottom:32px;width:380px;background:#16161e;border-left:1px solid #2a2b3d;display:flex;flex-direction:column;z-index:11;box-shadow:-4px 0 16px rgba(0,0,0,.35)}
+#methodpanel.hidden{display:none}
+#mp-head{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #2a2b3d}
+#mp-title{color:#7aa2f7;font-weight:600;font-size:13px}
+#mp-summary{flex-shrink:0;padding:10px 14px;color:#a9b1d6;font-size:12px;line-height:1.4;border-bottom:1px solid #2a2b3d}
+#mp-methods{flex:1;overflow:auto;padding:8px}
+.mp-call{background:#1e1f2e;border:1px solid #2a2b3d;border-radius:8px;padding:9px;margin-bottom:8px}
+.mp-line{display:flex;align-items:center;gap:6px;color:#787c99;font-size:11px;margin-bottom:8px}
+.mp-method{color:#c0caf5;font-size:11px;font-weight:600;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:145px}
+.mp-method:hover{color:#7aa2f7}
+.mp-actions{display:flex;gap:6px}
+.mp-actions .btn{flex:1;padding:5px 8px;font-size:11px}
 </style></head><body>
 
 <div id="topbar">
   <input id="search" type="text" placeholder="Search nodes..." oninput="searchNodes(this.value)">
   <div class="sep"></div>
-  <button class="btn" id="btn-explain" onclick="explainSelected()">✨ Explain</button>
   <button class="btn" onclick="cy.fit(null,40)">Fit All</button>
-  <button class="btn" id="btn-struct" onclick="togBtn('contains','btn-struct')">Hide Structure</button>
   <button class="btn" id="btn-calls" onclick="togBtn('calls','btn-calls')">Hide Calls</button>
   <button class="btn" onclick="layout()">Re-layout</button>
   <button class="btn" onclick="resetView()">Reset</button>
@@ -250,17 +326,24 @@ body{display:flex;flex-direction:column}
     <button class="sp-x" onclick="closePanel()">✕</button>
   </div>
   <div id="sp-summary"></div>
+  <div id="sp-detail"></div>
   <div id="sp-steps"></div>
   <div id="sp-risks"></div>
   <div id="sp-actions"><button class="btn" onclick="showAllSteps()">Show All Steps</button></div>
 </div>
 
+<div id="methodpanel" class="hidden">
+  <div id="mp-head">
+    <span id="mp-title">File Calls</span>
+    <button class="sp-x" onclick="closeMethodPanel()">x</button>
+  </div>
+  <div id="mp-summary"></div>
+  <div id="mp-methods"></div>
+</div>
+
 <div id="statusbar">
-  <div class="legend"><div class="dot" style="background:#ff9e64; border-radius:4px"></div>Class</div>
-  <div class="legend"><div class="dot" style="background:#bb9af7; border-radius:4px"></div>Abstract</div>
-  <div class="legend"><div class="dot" style="background:#7aa2f7; border-radius:4px"></div>Interface</div>
-  <div class="legend"><div class="dot" style="background:#9ece6a"></div>Method</div>
-  <div class="legend"><div class="dash" style="background:#c0caf5"></div>Inherits</div>
+  <div class="legend"><div class="dot" style="background:#7aa2f7; border-radius:4px"></div>File</div>
+  <div class="legend"><div class="dash" style="background:#7aa2f7"></div>Calls</div>
   <div class="sep"></div>
   <div id="stats">Loading...</div>
   <div id="selected-info"></div>
@@ -271,14 +354,27 @@ body{display:flex;flex-direction:column}
 var hidden = {};
 var hiddenNodes = {};
 var selectedNodeId = null;
+var selectedEdgeId = null;
 var currentSteps = [];
+var currentMethodCalls = [];
 var TYPE_COLORS = {input:'#7dcfff',validation:'#e0af68',processing:'#7aa2f7',persistence:'#9ece6a','external-call':'#bb9af7',ui:'#2ac3de','error-handling':'#f7768e',test:'#9ece6a',orchestration:'#bb9af7',unknown:'#c0caf5'};
 function colorByType(t){return TYPE_COLORS[t]||'#c0caf5';}
 function escapeHtml(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function escapeAttr(s){return escapeHtml(s).replace(/'/g,'&#39;').replace(/"/g,'&quot;');}
+function methodLabel(id){var s=(id||'').replace(/^method:/,'');return s.substring(s.lastIndexOf('.')+1);}
+function navigateMethod(id){if(window.navigateToNode)window.navigateToNode(id);}
+function explainMethod(id){openPanelLoading();if(window.explainNode)window.explainNode(id);}
 
 var cy=cytoscape({
   container:document.getElementById('cy'),
   style:[
+    {selector:'node[type="file"]',style:{
+      'background-color':'#1f2335','border-color':'data(color)','border-width':3,
+      'label':'data(label)','color':'#c0caf5','font-size':'12px','font-weight':'bold',
+      'text-valign':'center','text-halign':'center',
+      'shape':'round-rectangle','width':120,'height':48,
+      'text-wrap':'ellipsis','text-max-width':'105px','z-index':100
+    }},
     {selector:'node[type="class"]',style:{
       'background-color':'#2d1f0e','border-color':'data(color)','border-width':3,
       'label':'data(label)','color':'#c0caf5','font-size':'14px','font-weight':'bold',
@@ -337,14 +433,28 @@ var cy=cytoscape({
     {selector:'.highlight',style:{'border-color':'#ffffff','border-width':3}},
     {selector:'.search-match',style:{'border-color':'#ffffff','border-width':3}},
     {selector:'.stepglow',style:{'border-width':4,'shadow-blur':20,'shadow-color':'#ffffff','shadow-opacity':0.55,'z-index':300}},
-    {selector:'.stepedge',style:{'line-color':'#ffffff','target-arrow-color':'#ffffff','width':3,'opacity':1,'z-index':300}}
+    {selector:'.stepedge',style:{'line-color':'#ffffff','target-arrow-color':'#ffffff','width':3,'opacity':1,'z-index':300}},
+    {selector:'node[type="methodnode"]',style:{
+      'background-color':'#16161e','border-color':'data(color)','border-width':2,
+      'label':'data(label)','color':'#c0caf5','font-size':'9px',
+      'text-valign':'center','text-halign':'center','shape':'ellipse',
+      'width':38,'height':38,'text-wrap':'ellipsis','text-max-width':'34px','z-index':400
+    }},
+    {selector:'edge[type="methodcall"]',style:{
+      'line-color':'#e0af68','target-arrow-color':'#e0af68','target-arrow-shape':'triangle',
+      'curve-style':'bezier','width':2.5,'line-style':'dashed','arrow-scale':0.9,'z-index':400
+    }},
+    {selector:'edge[type="memberof"]',style:{
+      'line-color':'#565f89','target-arrow-shape':'none',
+      'curve-style':'bezier','width':1.5,'z-index':350
+    }}
   ],
   layout:{name:'cose'}
 });
 
 function layout(){
   var structuralElements = cy.elements().filter(function(ele) {
-    return ele.isNode() || ele.data('type') === 'contains';
+    return ele.isNode() || ele.data('type') === 'calls';
   });
 
   structuralElements.layout({
@@ -360,6 +470,7 @@ function layout(){
     gravity: 0.05,
     nodeRepulsion: function(node) {
       var t = node.data('type');
+      if (t === 'file') return 2500000;
       if (t === 'class' || t === 'abstract' || t === 'interface') return 4000000;
       return 800000;
     },
@@ -374,7 +485,8 @@ function updateGraph(d){
   cy.add(d.edges.filter(function(e){return ids.has(e.data.source)&&ids.has(e.data.target);}));
   layout();
   var nc=d.nodes.length,ec=d.edges.filter(function(e){return ids.has(e.data.source)&&ids.has(e.data.target);}).length;
-  document.getElementById('stats').textContent=nc+' nodes • '+ec+' edges';
+  var mc=d.edges.reduce(function(sum,e){return sum+((e.data.methodCalls||[]).length);},0);
+  document.getElementById('stats').textContent=nc+' files / '+ec+' edges / '+mc+' calls';
 }
 
 function focusNode(id){
@@ -446,27 +558,16 @@ function getRandomColor() {
 }
 
 function shuffleColors() {
-  var classColors = {};
+  var fileColors = {};
 
-  // 1. Give every class/interface/abstract a new random color
-  cy.nodes('[type="class"], [type="abstract"], [type="interface"]').forEach(function(node) {
+  cy.nodes('[type="file"]').forEach(function(node) {
       var c = getRandomColor();
-      classColors[node.id()] = c;
-      node.data('color', c); // Cytoscape instantly repaints the node!
+      fileColors[node.id()] = c;
+      node.data('color', c);
   });
 
-  // 2. Pass that parent color down to its methods and the 'contains' edges
-  cy.edges('[type="contains"]').forEach(function(edge) {
-      var parentColor = classColors[edge.source().id()];
-      if (parentColor) {
-          edge.data('color', parentColor);
-          edge.target().data('color', parentColor); // Updates the method node
-      }
-  });
-
-  // 3. Update 'calls' edges to match the calling method's new color
   cy.edges('[type="calls"]').forEach(function(edge) {
-      var callerColor = edge.source().data('color');
+      var callerColor = fileColors[edge.source().id()] || edge.source().data('color');
       if (callerColor) {
           edge.data('color', callerColor);
       }
@@ -476,6 +577,7 @@ function shuffleColors() {
 function resetView(){
   cy.elements().removeClass('dim highlight search-match');
   cy.elements().show();
+  closeMethodPanel();
   restoreHiddenStates();
 
   document.getElementById('search').value='';
@@ -519,18 +621,55 @@ cy.on('tap','node',function(e){
   cy.elements().removeClass('dim highlight');
   var node=e.target;
   selectedNodeId=node.id();
+  selectedEdgeId=null;
   cy.elements().not(node.closedNeighborhood()).addClass('dim');
   node.addClass('highlight');
   document.getElementById('selected-info').textContent='▶ '+node.data('label')+' ('+node.data('type')+')';
   if(window.navigateToNode)window.navigateToNode(node.id());
 });
+cy.on('tap','edge',function(e){
+  cy.elements().removeClass('dim highlight stepedge');
+  var edge=e.target;
+  selectedNodeId=null;
+  selectedEdgeId=edge.id();
+  edge.addClass('stepedge');
+  cy.elements().not(edge.connectedNodes().union(edge)).addClass('dim');
+  openMethodPanel(edge);
+});
 cy.on('tap',function(e){
   if(e.target===cy){
     selectedNodeId=null;
+    selectedEdgeId=null;
     cy.elements().removeClass('dim highlight');
+    closeMethodPanel();
     document.getElementById('selected-info').textContent='';
   }
 });
+
+function openMethodPanel(edge){
+  currentMethodCalls=edge.data('methodCalls')||[];
+  document.getElementById('steppanel').classList.add('hidden');
+  document.getElementById('methodpanel').classList.remove('hidden');
+  document.getElementById('mp-summary').textContent=edge.source().data('label')+' -> '+edge.target().data('label')+' / '+currentMethodCalls.length+' method calls';
+  var html='';
+  currentMethodCalls.forEach(function(c,i){
+    var caller=escapeAttr(c.callerMethod||'');
+    var target=escapeAttr(c.targetMethod||'');
+    html+='<div class="mp-call">'
+      +'<div class="mp-line"><span class="mp-method" ondblclick="navigateMethod(\''+caller+'\')" title="'+caller+'">'+escapeHtml(methodLabel(c.callerMethod))+'</span>'
+      +'<span>-></span>'
+      +'<span class="mp-method" ondblclick="navigateMethod(\''+target+'\')" title="'+target+'">'+escapeHtml(methodLabel(c.targetMethod))+'</span></div>'
+      +'<div class="mp-actions"><button class="btn" onclick="explainMethod(\''+caller+'\')">Explain caller</button>'
+      +'<button class="btn" onclick="explainMethod(\''+target+'\')">Explain target</button></div>'
+      +'</div>';
+  });
+  document.getElementById('mp-methods').innerHTML=html||'<div class="sp-step-e">No method calls recorded for this edge.</div>';
+  document.getElementById('selected-info').textContent=edge.source().data('label')+' -> '+edge.target().data('label');
+}
+
+function closeMethodPanel(){
+  document.getElementById('methodpanel').classList.add('hidden');
+}
 
 // ---- AI Explain focus mode (steps + animations) ----
 function explainSelected(){
@@ -540,16 +679,20 @@ function explainSelected(){
 }
 
 function openPanelLoading(){
+  closeMethodPanel();
   document.getElementById('steppanel').classList.remove('hidden');
   document.getElementById('sp-summary').textContent='Generating explanation…';
+  document.getElementById('sp-detail').textContent='';
   document.getElementById('sp-steps').innerHTML='';
   document.getElementById('sp-risks').innerHTML='';
 }
 
 function showExplanation(resp){
   currentSteps=(resp&&resp.steps)||[];
+  closeMethodPanel();
   document.getElementById('steppanel').classList.remove('hidden');
   document.getElementById('sp-summary').textContent=(resp&&resp.summary)||'';
+  document.getElementById('sp-detail').textContent=currentSteps.length?(currentSteps[0].detail||currentSteps[0].explanation||''):'';
   var html='';
   currentSteps.forEach(function(s,i){
     var c=colorByType(s.type);
@@ -587,40 +730,85 @@ function clearStepStyles(){
 function playStep(i){
   var s=currentSteps[i];
   if(!s)return;
+  document.getElementById('sp-detail').textContent=s.detail||s.explanation||'';
   var items=document.querySelectorAll('.sp-step');
   for(var k=0;k<items.length;k++)items[k].classList.toggle('active',k===i);
   clearStepStyles();
-  var nodes=stepNodes(s);
-  if(nodes.length===0)return;
-  var nb=nodes.closedNeighborhood();
-  cy.elements().not(nb).addClass('dim');
-  var color=colorByType(s.type);
-  nodes.style('border-color',color);
-  nodes.addClass('stepglow');
-  nodes.edgesWith(nodes).addClass('stepedge');
-  pulse(nodes);
-  cy.animate({fit:{eles:nb,padding:90}},{duration:450});
+  // Cumulative step-by-step connection on METHODS (files kept highlighted as context):
+  // light up each step's method + file from step 0 up to i, plus the call edges between them.
+  var used=cy.collection();
+  for(var j=0;j<=i;j++){
+    var sj=currentSteps[j];
+    var color=colorByType(sj.type);
+    (sj.focusNodes||[]).forEach(function(id){var n=cy.getElementById(id);if(n.length){n.style('border-color',color);n.addClass('stepglow');used=used.union(n);}});
+    if(sj.focusMethod){var mn=cy.getElementById(sj.focusMethod);if(mn.length){mn.style('border-color',color);mn.addClass('stepglow');used=used.union(mn);}}
+  }
+  if(used.length===0)return;
+  cy.elements().not(used).addClass('dim');
+  used.edgesWith(used).filter('edge[type="methodcall"], edge[type="memberof"]').removeClass('dim');
+  var cur=s.focusMethod?cy.getElementById(s.focusMethod):cy.collection();
+  pulse(cur.length?cur:stepNodes(s));
+  cy.animate({fit:{eles:used,padding:90}},{duration:450});
 }
 
 function showAllSteps(){
   clearStepStyles();
-  var all=cy.collection();
+  var used=cy.collection();
   currentSteps.forEach(function(s){
     var color=colorByType(s.type);
-    stepNodes(s).forEach(function(n){
-      if(n.length){n.style('border-color',color);n.addClass('stepglow');all=all.union(n);}
-    });
+    (s.focusNodes||[]).forEach(function(id){var n=cy.getElementById(id);if(n.length){n.style('border-color',color);n.addClass('stepglow');used=used.union(n);}});
+    if(s.focusMethod){var mn=cy.getElementById(s.focusMethod);if(mn.length){mn.style('border-color',color);mn.addClass('stepglow');used=used.union(mn);}}
   });
-  if(all.length===0)return;
-  var nb=all.closedNeighborhood();
-  cy.elements().not(nb).addClass('dim');
-  cy.animate({fit:{eles:nb,padding:80}},{duration:450});
+  if(used.length===0)return;
+  cy.elements().not(used).addClass('dim');
+  used.edgesWith(used).filter('edge[type="methodcall"], edge[type="memberof"]').removeClass('dim');
+  cy.animate({fit:{eles:used,padding:80}},{duration:450});
   var items=document.querySelectorAll('.sp-step');
   for(var k=0;k<items.length;k++)items[k].classList.remove('active');
 }
 
+// Method overlay: visible only during the step view, showing the used methods (the selected
+// method + the cross-file methods it calls) as nodes clustered on their files, connected by calls.
+function clearStepMethods(){
+  cy.elements('node[type="methodnode"]').remove();
+}
+
+function setStepMethods(data){
+  clearStepMethods();
+  if(!data||!data.methods)return;
+  var byFile={};
+  data.methods.forEach(function(m){(byFile[m.file]=byFile[m.file]||[]).push(m);});
+  Object.keys(byFile).forEach(function(fileId){
+    var fileNode=cy.getElementById(fileId);
+    var center=fileNode.length?fileNode.position():{x:0,y:0};
+    var list=byFile[fileId];
+    list.forEach(function(m,idx){
+      if(!cy.getElementById(m.id).length){
+        var ang=(2*Math.PI*idx)/Math.max(list.length,1)-Math.PI/2;
+        var r=70;
+        cy.add({group:'nodes',data:{id:m.id,label:m.label,type:'methodnode',file:m.file,color:m.color||'#e0af68'},
+          position:{x:center.x+r*Math.cos(ang),y:center.y+r*Math.sin(ang)}});
+      }
+      // file -> method containment edge (shown instead of file -> file connections)
+      if(fileNode.length){
+        var moId='mo_'+m.file+'__'+m.id;
+        if(!cy.getElementById(moId).length)
+          cy.add({group:'edges',data:{id:moId,source:m.file,target:m.id,type:'memberof'}});
+      }
+    });
+  });
+  (data.edges||[]).forEach(function(e){
+    if(cy.getElementById(e.source).length&&cy.getElementById(e.target).length){
+      var id='mc_'+e.source+'__'+e.target;
+      if(!cy.getElementById(id).length)
+        cy.add({group:'edges',data:{id:id,source:e.source,target:e.target,type:'methodcall'}});
+    }
+  });
+}
+
 function closePanel(){
   document.getElementById('steppanel').classList.add('hidden');
+  clearStepMethods();
   clearStepStyles();
   resetView();
 }

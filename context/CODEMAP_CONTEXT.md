@@ -33,25 +33,46 @@ Kotlin IntelliJ plugin (`src/main/kotlin/com/hackdelft/codegraph/`) with a Cytos
 
 ### Implemented
 
-- **Repo graph (Flow 1):** `GraphDataExtractor` uses PSI (`AllClassesSearch`) to build a deterministic graph of classes, interfaces, abstract classes, and methods, with `contains` / `calls` / `inherits` edges. Rendered by `CodeGraphPanel` (Cytoscape): search, structure/calls filters, per-class colors, click-to-navigate, right-click "Open in Graph View".
+- **Repo graph (Flow 1):** `GraphDataExtractor` uses PSI (`AllClassesSearch` + method-call resolution) to build a deterministic file-level graph. Nodes are source files. A directed `calls` edge connects file A to file B when a method in A calls a method in B. Calls for the same ordered file pair are aggregated into one edge with a `methodCalls` list. Rendered by `CodeGraphPanel` (Cytoscape): search, calls filter, folder-based file colors, click-to-open file, right-click "Open in Graph View" focuses the containing file.
 - **Local cache (Layer 1):** `GraphCache` reads/writes `.codemap/cache.json` (gitignored). `refreshGraph()` loads the cache or extracts; the "Refresh" button forces re-extract.
-- **Focused subgraph (Layer 2):** `FocusedSubgraphExtractor.extract(full, selectedId)` filters the full graph to ~24 nodes around a selection (1–2 hops + containing classes). Deterministic; no AI.
-- **AI explanation (Layer 3):** `AIExplainService` first builds a high-compute explanation prompt from the focused subgraph + code snippets, calls OpenAI with `gpt-5.5` (`reasoning_effort: high`, JSON mode), and asks the explanation pass to leave step types as `unknown`. It then runs a lightweight type-classification pass with `gpt-5.4-nano` to assign one allowed step type per step. The backend parses the result and validates every `focusNodes` id against the real subgraph (unknown/unsupported types -> `unknown`). The API key is loaded from `OPENAI_API_KEY`, `-Dopenai.api.key`, or the project `.env`; the service falls back to a deterministic offline mock when no key is available or the explanation request fails. Contracts in `ExplanationModels.kt` (`AIExplanationStep`, `AIExplanationResponse`).
-- **Step panel + animations (Layer 4):** In `CodeGraphPanel`'s embedded HTML — a side panel lists typed steps; `playStep` / `showAllSteps` glow/dim/animate the relevant nodes and edges, colored by step type (`TYPE_COLORS`). Frontend owns all animation; AI returns only a type string + node ids.
-- **Actions:** "Explain with CodeMap" (editor right-click → `ExplainWithCodeMapAction`) and "✨ Explain" (graph toolbar). Both route to `CodeGraphPanel.explainNode(nodeId)`.
+- **Focused subgraph (Layer 2):** `FocusedSubgraphExtractor.extract(full, selectedId, selectedFilePath)` filters the file-level graph to ~24 files around a selected file or selected method. For method explanations, it keeps file-call edges whose `methodCalls` mention the selected method plus nearby file context. Deterministic; no AI.
+- **AI explanation (Layer 3):** `AIExplainService` builds a **per-call walkthrough** prompt (one step per method call the selected method makes; a step may also be a non-call/logic step) and calls OpenAI `gpt-5.5` (`reasoning_effort: high`, JSON mode, **240s request timeout**); the explanation pass leaves step types as `unknown`. A second lightweight pass (`gpt-5.4-nano`, 20s) assigns one allowed step type per step. The backend then runs `pinAnchorAndSingleFile`: step 1 is pinned to the selected method's home file (the **anchor**), and every other step is reduced to one file **plus a deterministically-assigned `focusMethod`** (matched from the selected method's calls by target file; same-file repeats allowed). focusNodes/types are validated against the real subgraph. Key from `OPENAI_API_KEY`, `-Dopenai.api.key`, or project `.env`; deterministic offline mock on no-key or any failure (e.g. timeout). Contracts in `ExplanationModels.kt` — `AIExplanationStep` also carries `detail` and `focusMethod`.
+- **Step panel + method overlay (Layer 4):** Side panel lists typed steps, each with a detailed explanation (shown on click; no extra AI call). On explain, `setStepMethods` adds a **method overlay** — only the *used* methods (selected method + its cross-file callees) as small nodes clustered on their file node, linked by `memberof` (file→method) and `methodcall` (method→method) edges; `clearStepMethods` removes it when the panel closes. `playStep` / `showAllSteps` highlight **cumulatively on methods** (steps 0..i), keep each used method's file glowing as context, light only `methodcall` + `memberof` edges (**never file→file**), dim everything else, and pulse the current step's method. The auto-played step 0 is final (the old `focusNode` call after `showExplanation` was removed so it no longer re-lights neighbors). Frontend owns all animation; colors come from `TYPE_COLORS`.
+- **Actions:** "Explain with CodeMap" (editor right-click on a method -> `ExplainWithCodeMapAction`) routes to `CodeGraphPanel.explainNode(methodId)`. In the graph, clicking a file-to-file edge opens its aggregated method-call list; each caller/target method can be explained from there.
 
 ### Key conventions
 
-- Node ids: `class:<qualifiedName>`, `method:<qualifiedName>.<name>`. Edge types: `contains`, `calls`, `inherits`.
+- Node ids: main graph nodes use `file:<absolutePath>`. Method ids still use `method:<qualifiedName>.<name>` for explanation entry points and edge metadata. Main graph edge type is `calls`.
 - JS↔Kotlin bridge: one `JBCefJSQuery`; frontend posts `{t:'nav'|'explain'|'refresh', id}`, routed by `handleMessage`.
 - Step-type taxonomy is single-sourced in `AIExplainService.ALLOWED_TYPES`; mirror any new type into `TYPE_COLORS` in the HTML so it gets a color (else grey fallback).
-- AI prompts live only in `AIExplainService` (`buildPrompt` = explanation prompt; `buildTypePrompt` = step-type classifier prompt; system messages in `callExplanationModel` / `callTypeModel`). Model/endpoint constants live in that file. Current GPT-5.x chat-completion calls should not set non-default `temperature`.
+- AI prompts live only in `AIExplainService` (`buildPrompt` = explanation prompt; `buildTypePrompt` = step-type classifier prompt; system messages in `callExplanationModel` / `callTypeModel`). Model/endpoint/timeout constants live in that file. Current GPT-5.x chat-completion calls should not set non-default `temperature`.
+- Step view connections: `memberof` = file→method (containment), `methodcall` = method→method (call); file→file `calls` edges are NOT drawn during the step view. Each step carries one `focusNodes` file + one `focusMethod`; step 1 is the home file/method (anchor) and stays lit across all steps (cumulative).
 
 ### Not yet done
 
-- Richer node kinds (folders/files/external deps per the data contracts) — extractor is class/method only.
-- AI `focusEdges` are parsed but unused; step animations derive edges from `focusNodes`.
+- Richer node kinds (folders/external deps per the data contracts) are still not implemented; extractor is source-file only.
+- AI `focusEdges` are still not parsed into the UI; step animations derive edges from `focusNodes` / `focusMethod`.
 - Cold-start race: editor "Explain" on a never-opened tool window can fire before the web page finishes loading.
+- Method overlay is cross-file only — `GraphDataExtractor` skips same-file calls, so a method's same-file callees aren't shown as connected method nodes.
+- Method overlay nodes use a fixed radial cluster around their file (no compound/auto layout); they don't re-flow on Re-layout.
+
+### Implemented `clean_up` direction
+
+This branch reduces graph size and UI lag by changing the main repository map from method-level nodes to file-level nodes.
+
+- **File nodes instead of method nodes:** Each graph node should represent a source file, not an individual function/method. This keeps large projects readable and avoids creating thousands of nodes.
+- **Aggregated file-to-file edges:** If methods in file A call methods in file B, create a single edge from file A to file B. Do not create more than one edge for the same ordered pair of files.
+- **Method list on each connection:** Each file-to-file edge should store a list of method-level calls that caused that connection. For example, an edge can contain `callerMethod`, `targetMethod`, and source location metadata for each call.
+- **Directed graph:** If calls only go from file A to file B, show the edge as directed A -> B. If calls exist in both directions, support either two directed edges or a clear bidirectional representation, but still avoid duplicate edges for the same direction.
+- **Folder-aware visual treatment:** Files in the same folder share a node border color, and each file node carries a `folder` field for AI context and future layout/grouping work.
+- **Known Java caveat:** Object creation and constructor-heavy patterns may connect one file to many others in Java codebases, especially when dependency setup happens in a central class. Do not solve this immediately, but keep the edge metadata rich enough that this can be filtered or weighted later.
+- **AI remains method-based:** The AI explanation flow should still operate on methods and focused method-level context, even though the main graph is file-level.
+- **Method selection entry points:** Users should be able to trigger method explanations in two ways:
+  - Right-click a method in the code editor and choose "Explain with CodeMap".
+  - Open a file-to-file edge's method-call list and choose one of the methods shown there.
+- **Navigate to method code:** Double-clicking a method from an edge's method-call list should navigate to that method in the editor.
+- **Generated step details:** The AI response should include both the step summary shown in the list and a more thorough explanation for each step. Generate the thorough per-step response during the first AI call; do not make another AI request when the user clicks a step.
+- **Step click behavior:** Clicking a step should show the already-generated thorough explanation for that step and play only that step's predefined type animation. Step clicks should not regenerate AI content.
 
 ---
 
@@ -96,6 +117,15 @@ All AI output must be validated against known graph node IDs and edge IDs before
 7. User can click individual steps to highlight/animate only that step.
 8. User can also choose “Show all steps” to see the full flow at once.
 
+For the `clean_up` target graph, the graph flow should become method selection from a file-level map:
+
+1. User clicks a file node or file-to-file edge.
+2. If an edge is selected, CodeMap shows the aggregated method-call list for that file-to-file connection.
+3. User chooses a method from that list, or double-clicks the method to navigate to its code.
+4. CodeMap extracts focused method-level explanation context around the selected method.
+5. AI returns a structured step-by-step explanation, including both short list text and longer per-step detail text.
+6. Clicking a step shows the already-generated detail text and plays only that step's predefined type animation.
+
 ### Flow 3: Explain from editor
 
 1. User right-clicks a function/file/class in the IntelliJ editor.
@@ -104,6 +134,7 @@ All AI output must be validated against known graph node IDs and edge IDs before
 4. The graph focuses on the selected code element.
 5. AI generates a step-by-step explanation for the focused subgraph.
 6. The user can interact with the graph and explanation steps.
+7. For method explanations, right-clicking the method in code should remain the fastest entry point.
 
 ---
 
@@ -306,6 +337,25 @@ Keep them stable and simple.
 }
 ```
 
+For the `clean_up` file-level graph target, each edge should represent one aggregated directed file-to-file connection and include the method calls that caused it:
+
+```json
+{
+  "id": "fileA->fileB:calls",
+  "source": "file node id",
+  "target": "file node id",
+  "relation": "calls",
+  "methodCalls": [
+    {
+      "callerMethod": "qualified caller method",
+      "targetMethod": "qualified target method",
+      "callerLine": "optional line number",
+      "targetLine": "optional line number"
+    }
+  ]
+}
+```
+
 ### CodeGraph
 
 ```json
@@ -325,6 +375,7 @@ Keep them stable and simple.
   "title": "Short title",
   "type": "configured step type string",
   "explanation": "Short developer-friendly explanation",
+  "detail": "Longer explanation shown when the user opens this step",
   "focusNodes": ["existing node ids only"],
   "focusEdges": ["existing edge ids only"]
 }
@@ -401,6 +452,7 @@ Each step must include:
 - title
 - type
 - explanation
+- detail
 - focusNodes
 - focusEdges
 
