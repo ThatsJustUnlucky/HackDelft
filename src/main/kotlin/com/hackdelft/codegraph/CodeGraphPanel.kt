@@ -278,18 +278,73 @@ function focusNode(id){
 }
 
 function searchNodes(q){
+  // 1. Clean up previous search states
   cy.elements().removeClass('search-match dim');
-  if(!q)return;
-  q=q.toLowerCase();
-  var matches=cy.nodes().filter(function(n){return n.data('label').toLowerCase().indexOf(q)>=0;});
-  if(matches.length===0)return;
-  cy.elements().not(matches).addClass('dim');
+  cy.elements().show();
+
+  if(!q) {
+    // If search is cleared, restore any toggle button states and fit
+    restoreHiddenStates();
+    cy.fit(null, 40);
+    return;
+  }
+
+  q = q.toLowerCase();
+
+  // 2. Find exact or partial text matches
+  var matches = cy.nodes().filter(function(n){
+    return n.data('label').toLowerCase().indexOf(q) >= 0;
+  });
+
+  if(matches.length === 0) {
+    cy.elements().hide(); // Hide everything if no match
+    return;
+  }
+
+  // 3. Start a collection of elements we want to keep visible
+  var toShow = cy.collection().union(matches);
+
+  // 4. Add the 1st-degree neighborhood (callers, callees, and immediate parent/children)
+  var neighbors = matches.closedNeighborhood();
+  toShow = toShow.union(neighbors);
+
+  // 5. CRUCIAL: If a dependent method was pulled in, we MUST find its parent class
+  // Otherwise, you'd just see a floating method without knowing what class it belongs to.
+  var methodsInView = toShow.filter('node[type="method"]');
+  var parentEdges = cy.edges('[type="contains"]').filter(function(e){
+    return methodsInView.contains(e.target());
+  });
+
+  // Add those parent classes and the edges connecting them
+  toShow = toShow.union(parentEdges).union(parentEdges.sources());
+
+  // 6. Hide everything that isn't in our 'toShow' collection
+  cy.elements().not(toShow).hide();
+
+  // 7. Highlight the actual nodes that matched the text
   matches.addClass('search-match');
+
+  // 8. Smoothly zoom and pan to the newly filtered cluster
+  cy.animate({
+    fit: { eles: toShow, padding: 40 },
+    duration: 350
+  });
+}
+
+// Helper to ensure clicking "Reset" or clearing search respects your Hide/Show buttons
+function restoreHiddenStates() {
+  if (hidden['contains']) cy.$('edge[type="contains"]').hide();
+  if (hidden['calls']) cy.$('edge[type="calls"]').hide();
+  if (hiddenNodes['class']) cy.$('node[type="class"]').hide();
+  if (hiddenNodes['abstract']) cy.$('node[type="abstract"]').hide();
+  if (hiddenNodes['interface']) cy.$('node[type="interface"]').hide();
 }
 
 function resetView(){
   cy.elements().removeClass('dim highlight search-match');
   cy.elements().show();
+  restoreHiddenStates();
+
   document.getElementById('search').value='';
   document.getElementById('selected-info').textContent='';
   cy.fit(null,40);
