@@ -33,35 +33,35 @@ Kotlin IntelliJ plugin (`src/main/kotlin/com/hackdelft/codegraph/`) with a Cytos
 
 ### Implemented
 
-- **Repo graph (Flow 1):** `GraphDataExtractor` uses PSI (`AllClassesSearch`) to build a deterministic graph of classes, interfaces, abstract classes, and methods, with `contains` / `calls` / `inherits` edges. Rendered by `CodeGraphPanel` (Cytoscape): search, structure/calls filters, per-class colors, click-to-navigate, right-click "Open in Graph View".
+- **Repo graph (Flow 1):** `GraphDataExtractor` uses PSI (`AllClassesSearch` + method-call resolution) to build a deterministic file-level graph. Nodes are source files. A directed `calls` edge connects file A to file B when a method in A calls a method in B. Calls for the same ordered file pair are aggregated into one edge with a `methodCalls` list. Rendered by `CodeGraphPanel` (Cytoscape): search, calls filter, folder-based file colors, click-to-open file, right-click "Open in Graph View" focuses the containing file.
 - **Local cache (Layer 1):** `GraphCache` reads/writes `.codemap/cache.json` (gitignored). `refreshGraph()` loads the cache or extracts; the "Refresh" button forces re-extract.
-- **Focused subgraph (Layer 2):** `FocusedSubgraphExtractor.extract(full, selectedId)` filters the full graph to ~24 nodes around a selection (1–2 hops + containing classes). Deterministic; no AI.
+- **Focused subgraph (Layer 2):** `FocusedSubgraphExtractor.extract(full, selectedId, selectedFilePath)` filters the file-level graph to ~24 files around a selected file or selected method. For method explanations, it keeps file-call edges whose `methodCalls` mention the selected method plus nearby file context. Deterministic; no AI.
 - **AI explanation (Layer 3):** `AIExplainService` first builds a high-compute explanation prompt from the focused subgraph + code snippets, calls OpenAI with `gpt-5.5` (`reasoning_effort: high`, JSON mode), and asks the explanation pass to leave step types as `unknown`. It then runs a lightweight type-classification pass with `gpt-5.4-nano` to assign one allowed step type per step. The backend parses the result and validates every `focusNodes` id against the real subgraph (unknown/unsupported types -> `unknown`). The API key is loaded from `OPENAI_API_KEY`, `-Dopenai.api.key`, or the project `.env`; the service falls back to a deterministic offline mock when no key is available or the explanation request fails. Contracts in `ExplanationModels.kt` (`AIExplanationStep`, `AIExplanationResponse`).
-- **Step panel + animations (Layer 4):** In `CodeGraphPanel`'s embedded HTML — a side panel lists typed steps; `playStep` / `showAllSteps` glow/dim/animate the relevant nodes and edges, colored by step type (`TYPE_COLORS`). Frontend owns all animation; AI returns only a type string + node ids.
-- **Actions:** "Explain with CodeMap" (editor right-click → `ExplainWithCodeMapAction`) and "✨ Explain" (graph toolbar). Both route to `CodeGraphPanel.explainNode(nodeId)`.
+- **Step panel + animations (Layer 4):** In `CodeGraphPanel`'s embedded HTML, a side panel lists typed steps and stores a detailed explanation for each step. `playStep` / `showAllSteps` glow/dim/animate the relevant file nodes and edges, colored by step type (`TYPE_COLORS`). Frontend owns all animation; AI returns only text, a type string, and node ids.
+- **Actions:** "Explain with CodeMap" (editor right-click on a method -> `ExplainWithCodeMapAction`) routes to `CodeGraphPanel.explainNode(methodId)`. In the graph, clicking a file-to-file edge opens its aggregated method-call list; each caller/target method can be explained from there.
 
 ### Key conventions
 
-- Node ids: `class:<qualifiedName>`, `method:<qualifiedName>.<name>`. Edge types: `contains`, `calls`, `inherits`.
+- Node ids: main graph nodes use `file:<absolutePath>`. Method ids still use `method:<qualifiedName>.<name>` for explanation entry points and edge metadata. Main graph edge type is `calls`.
 - JS↔Kotlin bridge: one `JBCefJSQuery`; frontend posts `{t:'nav'|'explain'|'refresh', id}`, routed by `handleMessage`.
 - Step-type taxonomy is single-sourced in `AIExplainService.ALLOWED_TYPES`; mirror any new type into `TYPE_COLORS` in the HTML so it gets a color (else grey fallback).
 - AI prompts live only in `AIExplainService` (`buildPrompt` = explanation prompt; `buildTypePrompt` = step-type classifier prompt; system messages in `callExplanationModel` / `callTypeModel`). Model/endpoint constants live in that file. Current GPT-5.x chat-completion calls should not set non-default `temperature`.
 
 ### Not yet done
 
-- Richer node kinds (folders/files/external deps per the data contracts) — extractor is class/method only.
-- AI `focusEdges` are parsed but unused; step animations derive edges from `focusNodes`.
+- Richer node kinds (folders/external deps per the data contracts) are still not implemented; extractor is source-file only.
+- AI `focusEdges` are still not parsed into the UI; step animations derive edges from `focusNodes`.
 - Cold-start race: editor "Explain" on a never-opened tool window can fire before the web page finishes loading.
 
-### Planned `clean_up` direction
+### Implemented `clean_up` direction
 
-This branch should reduce graph size and UI lag by changing the main repository map from method-level nodes to file-level nodes.
+This branch reduces graph size and UI lag by changing the main repository map from method-level nodes to file-level nodes.
 
 - **File nodes instead of method nodes:** Each graph node should represent a source file, not an individual function/method. This keeps large projects readable and avoids creating thousands of nodes.
 - **Aggregated file-to-file edges:** If methods in file A call methods in file B, create a single edge from file A to file B. Do not create more than one edge for the same ordered pair of files.
 - **Method list on each connection:** Each file-to-file edge should store a list of method-level calls that caused that connection. For example, an edge can contain `callerMethod`, `targetMethod`, and source location metadata for each call.
 - **Directed graph:** If calls only go from file A to file B, show the edge as directed A -> B. If calls exist in both directions, support either two directed edges or a clear bidirectional representation, but still avoid duplicate edges for the same direction.
-- **Folder-aware layout:** Files in the same folder/package should be visually grouped or placed near each other when possible. This can be done through layout hints, group labels, parent clusters, or another lightweight visual treatment.
+- **Folder-aware visual treatment:** Files in the same folder share a node border color, and each file node carries a `folder` field for AI context and future layout/grouping work.
 - **Known Java caveat:** Object creation and constructor-heavy patterns may connect one file to many others in Java codebases, especially when dependency setup happens in a central class. Do not solve this immediately, but keep the edge metadata rich enough that this can be filtered or weighted later.
 - **AI remains method-based:** The AI explanation flow should still operate on methods and focused method-level context, even though the main graph is file-level.
 - **Method selection entry points:** Users should be able to trigger method explanations in two ways:

@@ -57,8 +57,12 @@ Return JSON only.
 Create a short (3-6) step-by-step explanation of how the selected node interacts with the rest of the focused graph.
 Set every step type to "unknown". A separate lightweight classifier will assign step types.
 
+For each step, include:
+- explanation: one short sentence for the step list
+- detail: a fuller explanation shown when the user clicks the step
+
 Respond with a JSON object of this shape:
-{"summary": string, "steps": [{"id": string, "title": string, "type": string, "explanation": string, "focusNodes": [existing node ids only], "focusEdges": []}], "riskNotes": [string], "suggestedNextNodes": [existing node ids]}
+{"summary": string, "steps": [{"id": string, "title": string, "type": string, "explanation": string, "detail": string, "focusNodes": [existing node ids only], "focusEdges": []}], "riskNotes": [string], "suggestedNextNodes": [existing node ids]}
 
 Selected node: $selStr
 
@@ -70,8 +74,13 @@ $snipStr
   }
 
   private fun graphToJson(d: GraphData): String {
-    val nodes = d.nodes.joinToString(",") { """{"id":"${it.id.j()}","label":"${it.label.j()}","type":"${it.type}"}""" }
-    val edges = d.edges.joinToString(",") { """{"source":"${it.source.j()}","target":"${it.target.j()}","type":"${it.type}"}""" }
+    val nodes = d.nodes.joinToString(",") { """{"id":"${it.id.j()}","label":"${it.label.j()}","type":"${it.type}","folder":"${it.folder.j()}"}""" }
+    val edges = d.edges.joinToString(",") { edge ->
+      val calls = edge.methodCalls.take(20).joinToString(",") { call ->
+        """{"callerMethod":"${call.callerMethod.j()}","targetMethod":"${call.targetMethod.j()}","callerLine":${call.callerLine},"targetLine":${call.targetLine}}"""
+      }
+      """{"source":"${edge.source.j()}","target":"${edge.target.j()}","type":"${edge.type}","methodCalls":[$calls]}"""
+    }
     return """{"nodes":[$nodes],"edges":[$edges]}"""
   }
 
@@ -146,7 +155,7 @@ $snipStr
     val nodeLabels = focused.nodes.associate { it.id to "${it.type} ${it.label}" }
     val steps = response.steps.joinToString(",") { step ->
       val focus = step.focusNodes.joinToString(",") { id -> """"${id.j()}":"${(nodeLabels[id] ?: id).j()}"""" }
-      """{"id":"${step.id.j()}","title":"${step.title.j()}","explanation":"${step.explanation.j()}","focusNodes":{$focus}}"""
+      """{"id":"${step.id.j()}","title":"${step.title.j()}","explanation":"${step.explanation.j()}","detail":"${step.detail.j()}","focusNodes":{$focus}}"""
     }
     return """
 Assign exactly one type to each explanation step.
@@ -184,6 +193,7 @@ Return JSON only:
         title = o.str("title") ?: "Step ${i + 1}",
         type = o.str("type") ?: "unknown",
         explanation = o.str("explanation") ?: "",
+        detail = o.str("detail") ?: o.str("explanation") ?: "",
         focusNodes = o.arr("focusNodes")
       )
     } ?: emptyList()
@@ -204,6 +214,7 @@ Return JSON only:
         title = s.title,
         type = if (ALLOWED_TYPES.contains(s.type)) s.type else "unknown",
         explanation = s.explanation,
+        detail = s.detail,
         focusNodes = s.focusNodes.filter { ids.contains(it) }.ifEmpty { listOf(fallbackNode) }
       )
     }
@@ -224,22 +235,27 @@ Return JSON only:
   ): AIExplanationResponse {
     val byId = focused.nodes.associateBy { it.id }
     val sel = byId[selectedId]
+    val focusId = if (byId.containsKey(selectedId)) selectedId else (focused.nodes.firstOrNull()?.id ?: selectedId)
     val selLabel = sel?.label ?: selectedId
     val neighbors = focused.edges
-      .filter { it.source == selectedId || it.target == selectedId }
-      .map { if (it.source == selectedId) it.target else it.source }
+      .filter { it.source == focusId || it.target == focusId }
+      .map { if (it.source == focusId) it.target else it.source }
       .distinct()
 
     val steps = mutableListOf(
       AIExplanationStep("step-1", "Entry point", "orchestration",
-        "$selLabel is the focus of this view.", listOf(selectedId))
+        "$selLabel is the focus of this view.",
+        "CodeMap is showing an offline explanation because the AI call is unavailable. This selected method or file is the starting point for the focused walkthrough.",
+        listOf(focusId))
     )
     val cycle = listOf("processing", "external-call", "persistence", "validation", "ui")
     neighbors.take(4).forEachIndexed { i, nId ->
       val n = byId[nId] ?: return@forEachIndexed
       steps += AIExplanationStep(
         "step-${i + 2}", n.label, cycle[i % cycle.size],
-        "$selLabel is connected to ${n.label}.", listOf(selectedId, nId)
+        "$selLabel is connected to ${n.label}.",
+        "The deterministic graph found a connection between $selLabel and ${n.label}. Use the graph highlight to inspect the related file or method.",
+        listOf(focusId, nId)
       )
     }
     return AIExplanationResponse(

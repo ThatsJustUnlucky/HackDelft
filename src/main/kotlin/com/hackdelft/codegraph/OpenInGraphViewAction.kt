@@ -12,8 +12,8 @@ class OpenInGraphViewAction : AnAction("Open in Graph View") {
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
         val method = method(e) ?: return
-        val cls = method.containingClass?.qualifiedName ?: return
-        val nodeId = "method:$cls.${method.name}"
+        val path = method.containingFile?.virtualFile?.path?.replace('\\', '/') ?: return
+        val nodeId = "file:$path"
         val tw = ToolWindowManager.getInstance(project).getToolWindow("Code Graph") ?: return
         tw.show { CodeGraphPanel.getInstance(project)?.focusNode(nodeId) }
     }

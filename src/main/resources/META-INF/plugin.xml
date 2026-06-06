@@ -2,7 +2,7 @@
     <id>com.hackdelft.codegraph</id>
     <name>Code Graph</name>
     <vendor>HackDelft 2026</vendor>
-    <description>Obsidian-like interactive graph of your codebase — files, classes, and method call relationships.</description>
+    <description>Interactive file-level graph of your codebase with aggregated method call relationships and AI method explanations.</description>
 
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.java</depends>
@@ -19,13 +19,13 @@
         <action id="com.hackdelft.codegraph.OpenInGraphViewAction"
                 class="com.hackdelft.codegraph.OpenInGraphViewAction"
                 text="Open in Graph View"
-                description="Highlight this method in the Code Graph tool window">
+                description="Highlight this method's file in the Code Graph tool window">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
         </action>
         <action id="com.hackdelft.codegraph.ExplainWithCodeMapAction"
                 class="com.hackdelft.codegraph.ExplainWithCodeMapAction"
                 text="Explain with CodeMap"
-                description="Generate an AI step-by-step explanation of this method/class in the Code Graph">
+                description="Generate an AI step-by-step explanation of this method in the Code Graph">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
         </action>
     </actions>
