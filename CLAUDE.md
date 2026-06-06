@@ -54,4 +54,4 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 These guidelines are working if: fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
-IMPORTANT: The general context of the file is at "context\CODEMAP_CONTEXT.md". When you are told to push, always make sure to update that file. Make it clean and not too long but include enough information for other ai agents to keep working. When you are tasked to do something, make sure you have that context available to you.
+IMPORTANT: The general context of the file is at "context\CODEMAP_CONTEXT.md". When you are told to push, always make sure to update that file. ONLY CHANGE THIS FILE IF IT PUSHED TO MAIN. Make it clean and not too long but include enough information for other ai agents to keep working. When you are tasked to do something, make sure you have that context available to you.
