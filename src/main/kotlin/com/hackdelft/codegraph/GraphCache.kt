@@ -31,7 +31,7 @@ class GraphCache(project: Project) {
 
   private fun serialize(d: GraphData): String {
     val nodes = d.nodes.joinToString(",") { n ->
-      """{"id":"${n.id.e()}","label":"${n.label.e()}","type":"${n.type}","filePath":"${n.filePath.e()}","color":"${n.color}","folder":"${n.folder.e()}"}"""
+      """{"id":"${n.id.e()}","label":"${n.label.e()}","type":"${n.type}","filePath":"${n.filePath.e()}","color":"${n.color}","folder":"${n.folder.e()}","isTest":${n.isTest}}"""
     }
     val edges = d.edges.filter { it.type != "calls" || it.methodCalls.isNotEmpty() }.joinToString(",") { e ->
       val calls = e.methodCalls.joinToString(",") { c ->
@@ -50,7 +50,8 @@ class GraphCache(project: Project) {
         o.get("id").asString, o.get("label").asString, o.get("type").asString,
         o.get("filePath").asString,
         o.get("color")?.takeIf { c -> !c.isJsonNull }?.asString ?: "",
-        o.get("folder")?.takeIf { f -> !f.isJsonNull }?.asString ?: ""
+        o.get("folder")?.takeIf { f -> !f.isJsonNull }?.asString ?: "",
+        o.get("isTest")?.takeIf { t -> !t.isJsonNull }?.asBoolean ?: false
       )
     }
     val edges = root.getAsJsonArray("edges").map {
