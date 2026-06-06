@@ -437,6 +437,42 @@ function restoreHiddenStates() {
   if (hiddenNodes['interface']) cy.$('node[type="interface"]').hide();
 }
 
+// Generates a bright, visible HSL color
+function getRandomColor() {
+  var h = Math.floor(Math.random() * 360);
+  var s = Math.floor(60 + Math.random() * 40); // 60-100% saturation
+  var l = Math.floor(60 + Math.random() * 20); // 60-80% lightness
+  return 'hsl(' + h + ', ' + s + '%, ' + l + '%)';
+}
+
+function shuffleColors() {
+  var classColors = {};
+
+  // 1. Give every class/interface/abstract a new random color
+  cy.nodes('[type="class"], [type="abstract"], [type="interface"]').forEach(function(node) {
+      var c = getRandomColor();
+      classColors[node.id()] = c;
+      node.data('color', c); // Cytoscape instantly repaints the node!
+  });
+
+  // 2. Pass that parent color down to its methods and the 'contains' edges
+  cy.edges('[type="contains"]').forEach(function(edge) {
+      var parentColor = classColors[edge.source().id()];
+      if (parentColor) {
+          edge.data('color', parentColor);
+          edge.target().data('color', parentColor); // Updates the method node
+      }
+  });
+
+  // 3. Update 'calls' edges to match the calling method's new color
+  cy.edges('[type="calls"]').forEach(function(edge) {
+      var callerColor = edge.source().data('color');
+      if (callerColor) {
+          edge.data('color', callerColor);
+      }
+  });
+}
+
 function resetView(){
   cy.elements().removeClass('dim highlight search-match');
   cy.elements().show();
@@ -444,6 +480,7 @@ function resetView(){
 
   document.getElementById('search').value='';
   document.getElementById('selected-info').textContent='';
+  shuffleColors();
   cy.fit(null,40);
 }
 
