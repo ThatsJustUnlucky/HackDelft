@@ -29,11 +29,11 @@ The core product idea is:
 
 ## Current Implementation Status
 
-Kotlin IntelliJ plugin (`src/main/kotlin/com/hackdelft/codegraph/`) with a Cytoscape.js frontend embedded in a JCEF tool window. Build: Gradle 8.6, JDK 17 toolchain, IntelliJ 2023.2.5, `org.jetbrains.intellij` 1.17.4. Run with `./gradlew runIde` (the Gradle wrapper is committed).
+Kotlin IntelliJ plugin (`src/main/kotlin/com/hackdelft/codegraph/`) with a D3-force SVG frontend (a single self-contained HTML/JS string in `CodeGraphPanel.html()`) embedded in a JCEF tool window. Build: Gradle 8.6, JDK 17 toolchain, IntelliJ 2023.2.5, `org.jetbrains.intellij` 1.17.4. Run with `./gradlew runIde` (the Gradle wrapper is committed). `runIde` reads `OPENAI_API_KEY` from the project `.env` and passes it as `-Dopenai.api.key` so the AI flow finds a key in the sandbox.
 
 ### Implemented
 
-- **Repo graph (Flow 1):** `GraphDataExtractor` uses PSI (`AllClassesSearch` + method-call resolution) to build a deterministic file-level graph. Nodes are source files. A directed `calls` edge connects file A to file B when a method in A calls a method in B. Calls for the same ordered file pair are aggregated into one edge with a `methodCalls` list. Rendered by `CodeGraphPanel` (Cytoscape): search, calls filter, folder-based file colors, click-to-open file, right-click "Open in Graph View" focuses the containing file.
+- **Repo graph (Flow 1):** `GraphDataExtractor` uses PSI (`AllClassesSearch` + method-call resolution) to build a deterministic file-level graph. Nodes are source files. A directed `calls` edge connects file A to file B when a method in A calls a method in B. Calls for the same ordered file pair are aggregated into one edge with a `methodCalls` list. The extractor also emits directed `inherits` edges (extends/implements; library supertypes skipped) and `tests` edges (test file → tested class, matched by `XxxTest`→`Xxx` naming else the production file the test calls into most), and flags test files with `isTest`. Rendered by `CodeGraphPanel` as a **D3-force SVG** graph: continuous force simulation, node radius scaled by connection count, folder-based color clustering, drag-to-fling, hover-to-focus dimming, zoom-aware labels, a live force-tuning panel (Spread / Link length / Grouping sliders), per-type edge toggles (calls / inherits / tests), search, and click-to-open file.
 - **Local cache (Layer 1):** `GraphCache` reads/writes `.codemap/cache.json` (gitignored). `refreshGraph()` loads the cache or extracts; the "Refresh" button forces re-extract.
 - **Focused subgraph (Layer 2):** `FocusedSubgraphExtractor.extract(full, selectedId, selectedFilePath)` filters the file-level graph to ~24 files around a selected file or selected method. For method explanations, it keeps file-call edges whose `methodCalls` mention the selected method plus nearby file context. Deterministic; no AI.
 - **AI explanation (Layer 3):** `AIExplainService` builds a **per-call walkthrough** prompt (one step per method call the selected method makes; a step may also be a non-call/logic step) and calls OpenAI `gpt-5.5` (`reasoning_effort: high`, JSON mode, **240s request timeout**); the explanation pass leaves step types as `unknown`. A second lightweight pass (`gpt-5.4-nano`, 20s) assigns one allowed step type per step. The backend then runs `pinAnchorAndSingleFile`: step 1 is pinned to the selected method's home file (the **anchor**), and every other step is reduced to one file **plus a deterministically-assigned `focusMethod`** (matched from the selected method's calls by target file; same-file repeats allowed). focusNodes/types are validated against the real subgraph. Key from `OPENAI_API_KEY`, `-Dopenai.api.key`, or project `.env`; deterministic offline mock on no-key or any failure (e.g. timeout). Contracts in `ExplanationModels.kt` — `AIExplanationStep` also carries `detail` and `focusMethod`.
@@ -42,15 +42,16 @@ Kotlin IntelliJ plugin (`src/main/kotlin/com/hackdelft/codegraph/`) with a Cytos
 
 ### Key conventions
 
-- Node ids: main graph nodes use `file:<absolutePath>`. Method ids still use `method:<qualifiedName>.<name>` for explanation entry points and edge metadata. Main graph edge type is `calls`.
+- Node ids: main graph nodes use `file:<absolutePath>` and carry an `isTest` boolean. Method ids still use `method:<qualifiedName>.<name>` for explanation entry points and edge metadata. Main graph edge types are `calls`, `inherits`, and `tests`.
 - JS↔Kotlin bridge: one `JBCefJSQuery`; frontend posts `{t:'nav'|'explain'|'refresh', id}`, routed by `handleMessage`.
+- Renderer is vanilla **D3 v7** (no React, no Cytoscape), loaded from CDN inside `html()`. Kotlin drives it through a fixed JS API — `updateGraph(d)`, `focusNode(id)`, `showExplanation(resp)`, `setStepMethods(data)` — keep these signatures stable; the Kotlin side calls them by name. The `html()` Kotlin raw string must avoid `$`-interpolation triggers (no JS template literals / `${...}`); build JS strings with `+` concatenation.
 - Step-type taxonomy is single-sourced in `AIExplainService.ALLOWED_TYPES`; mirror any new type into `TYPE_COLORS` in the HTML so it gets a color (else grey fallback).
 - AI prompts live only in `AIExplainService` (`buildPrompt` = explanation prompt; `buildTypePrompt` = step-type classifier prompt; system messages in `callExplanationModel` / `callTypeModel`). Model/endpoint/timeout constants live in that file. Current GPT-5.x chat-completion calls should not set non-default `temperature`.
 - Step view connections: `memberof` = file→method (containment), `methodcall` = method→method (call); file→file `calls` edges are NOT drawn during the step view. Each step carries one `focusNodes` file + one `focusMethod`; step 1 is the home file/method (anchor) and stays lit across all steps (cumulative).
 
 ### Not yet done
 
-- Richer node kinds (folders/external deps per the data contracts) are still not implemented; extractor is source-file only.
+- Inheritance (`inherits`) and test (`tests`) edges plus the `isTest` file flag are implemented. Still missing: folder/package container nodes and external-dependency nodes (per the data contracts). The extractor covers source files + class relationships only.
 - AI `focusEdges` are still not parsed into the UI; step animations derive edges from `focusNodes` / `focusMethod`.
 - Cold-start race: editor "Explain" on a never-opened tool window can fire before the web page finishes loading.
 - Method overlay is cross-file only — `GraphDataExtractor` skips same-file calls, so a method's same-file callees aren't shown as connected method nodes.
@@ -281,7 +282,7 @@ Backend responsibilities:
 
 ## Frontend Responsibilities
 
-The frontend is a React app embedded inside the IntelliJ plugin using a JCEF tool window.
+The frontend is a vanilla D3-force SVG renderer (no React) embedded inside the IntelliJ plugin using a JCEF tool window.
 
 Frontend responsibilities:
 
@@ -297,13 +298,9 @@ Frontend responsibilities:
 - Send node-click events back to the IntelliJ backend.
 - Be polished enough for a hackathon demo.
 
-Recommended graph library:
+Graph library (actual):
 
-- React Flow, for quick custom graph nodes, animated edges, clickable nodes, and viewport controls.
-
-Alternative:
-
-- Cytoscape.js, if the team prefers graph-specific layouts.
+- **D3 v7 force simulation rendering to SVG**, implemented directly in `CodeGraphPanel.html()` (no React, no Cytoscape). Continuous `forceSimulation` with charge / link / collide forces plus folder-anchored `forceX`/`forceY` clustering; `d3.zoom` on an SVG `<g>` viewport; `d3.drag` with `container` set to the nodes group so dragging works correctly under zoom; node radius derived from connection count.
 
 ---
 
