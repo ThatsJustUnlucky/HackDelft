@@ -148,8 +148,9 @@ body{display:flex;flex-direction:column}
 <div id="cy"></div>
 
 <div id="statusbar">
-  <div class="legend"><div class="dot" style="background:#7aa2f7"></div>File</div>
-  <div class="legend"><div class="dot" style="background:#ff9e64"></div>Class</div>
+  <div class="legend"><div class="dot" style="background:#ff9e64; border-radius:4px"></div>Class</div>
+  <div class="legend"><div class="dot" style="background:#bb9af7; border-radius:4px"></div>Abstract</div>
+  <div class="legend"><div class="dot" style="background:#7aa2f7; border-radius:4px"></div>Interface</div>
   <div class="legend"><div class="dot" style="background:#9ece6a"></div>Method</div>
   <div class="legend"><div class="dash" style="background:#f7768e"></div>Calls</div>
   <div class="sep"></div>
@@ -162,29 +163,45 @@ body{display:flex;flex-direction:column}
 var cy=cytoscape({
   container:document.getElementById('cy'),
   style:[
-    {selector:'node[type="file"]',style:{
-      'background-color':'#1d3054','border-color':'#7aa2f7','border-width':2,
-      'label':'data(label)','color':'#c0caf5','font-size':'12px','font-weight':'bold',
-      'text-valign':'center','text-halign':'center',
-      'width':140,'height':42,'shape':'round-rectangle',
-      'text-wrap':'ellipsis','text-max-width':'128px',
-      'padding':'8px'
-    }},
+    // Standard Class (Rectangle)
     {selector:'node[type="class"]',style:{
       'background-color':'#2d1f0e','border-color':'#ff9e64','border-width':3,
-      'label':'data(label)','color':'#c0caf5','font-size':'13px','font-weight':'bold',
+      'label':'data(label)','color':'#c0caf5','font-size':'14px','font-weight':'bold',
       'text-valign':'center','text-halign':'center',
-      'width':90,'height':90,'shape':'ellipse',
-      'text-wrap':'ellipsis','text-max-width':'80px',
+      'shape':'round-rectangle',
+      'width':120,'height':45,
+      'text-wrap':'ellipsis','text-max-width':'100px',
       'z-index': 100
     }},
+    // Abstract Class (Purple Square)
+    {selector:'node[type="abstract"]',style:{
+      'background-color':'#2a1a3a','border-color':'#bb9af7','border-width':3,
+      'label':'data(label)','color':'#c0caf5','font-size':'13px','font-weight':'bold',
+      'text-valign':'center','text-halign':'center',
+      'shape':'round-rectangle',
+      'width':80,'height':80,
+      'text-wrap':'ellipsis','text-max-width':'70px',
+      'z-index': 100
+    }},
+    // Interface (Blue Square)
+    {selector:'node[type="interface"]',style:{
+      'background-color':'#1a2035','border-color':'#7aa2f7','border-width':3,
+      'label':'data(label)','color':'#c0caf5','font-size':'13px','font-weight':'bold',
+      'text-valign':'center','text-halign':'center',
+      'shape':'round-rectangle',
+      'width':80,'height':80,
+      'text-wrap':'ellipsis','text-max-width':'70px',
+      'z-index': 100
+    }},
+    // Method (Stays an Ellipse/Circle)
     {selector:'node[type="method"]',style:{
       'background-color':'#1a2e10','border-color':'#9ece6a','border-width':2,
-      'label':'data(label)','color':'#c0caf5','font-size':'10px',
+      'label':'data(label)','color':'#c0caf5','font-size':'11px',
       'text-valign':'center','text-halign':'center',
-      'width':60,'height':60,'shape':'ellipse',
-      'text-wrap':'ellipsis','text-max-width':'54px'
+      'width':65,'height':65,'shape':'ellipse',
+      'text-wrap':'ellipsis','text-max-width':'55px'
     }},
+    // Edges
     {selector:'edge[type="contains"]',style:{
       'line-color':'#2a2b3d','target-arrow-color':'#2a2b3d','target-arrow-shape':'chevron',
       'curve-style':'bezier','width':1.5,'opacity':0.7,'arrow-scale':0.8
@@ -194,45 +211,47 @@ var cy=cytoscape({
       'curve-style':'unbundled-bezier','width':2,'line-style':'dashed','opacity':0.85,
       'arrow-scale':0.9,'control-point-step-size':40
     }},
-    {selector:'node:selected',style:{'border-width':3,'border-color':'#bb9af7','shadow-blur':12,'shadow-color':'#bb9af7','shadow-opacity':0.6,'shadow-offset-x':0,'shadow-offset-y':0}},
+    // States
+    {selector:'node:selected',style:{'border-width':3,'border-color':'#e0af68','shadow-blur':15,'shadow-color':'#e0af68','shadow-opacity':0.8}},
     {selector:'.dim',style:{opacity:0.07}},
-    {selector:'.highlight',style:{'border-color':'#bb9af7','border-width':3}},
+    {selector:'.highlight',style:{'border-color':'#e0af68','border-width':3}},
     {selector:'.search-match',style:{'border-color':'#e0af68','border-width':3}}
   ],
   layout:{name:'cose'}
 });
 
 function layout(){
-  // 1. Filter out the 'calls' edges so they don't apply physics forces
   var structuralElements = cy.elements().filter(function(ele) {
     return ele.isNode() || ele.data('type') === 'contains';
   });
 
-  // 2. Run the layout ONLY on the structure
   structuralElements.layout({
     name: 'cose',
     animate: true,
     animationDuration: 600,
 
-    // Strict overlap prevention
-    nodeOverlap: 60,
+    // 1. The Overlap Forcefield
+    nodeOverlap: 8000,
     nodeDimensionsIncludeLabels: true,
 
-    // Physics parameters
-    numIter: 3000,
-    initialTemp: 400,
-    coolingFactor: 0.98,
+    // 2. Extend the Orbits (Compensates for the 120px wide rectangles)
+    idealEdgeLength: 250,
+
+    // 3. Keep the simulation "hot" so it has time to push everything apart
+    numIter: 4000,
+    initialTemp: 500,
+    coolingFactor: 0.99,
     gravity: 0.05,
 
-    // Massive repulsion to keep the orbits clean
+    // 4. Massive Repulsion
     nodeRepulsion: function(node) {
-      if (node.data('type') === 'class' || node.data('type') === 'file') return 2000000;
-      return 600000;
+      var t = node.data('type');
+      if (t === 'class' || t === 'abstract' || t === 'interface') return 4000000;
+      return 800000;
     },
 
-    // Since we filtered out 'calls', we only deal with 'contains' edges here
-    idealEdgeLength: 120,
-    edgeElasticity: 0.2
+    // Allow the methods to slide around the class to find open space
+    edgeElasticity: 0.1
 
   }).run();
 }

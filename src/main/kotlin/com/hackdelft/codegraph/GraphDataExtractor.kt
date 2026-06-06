@@ -5,6 +5,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.psi.JavaRecursiveElementVisitor
 import com.intellij.psi.PsiClass
 import com.intellij.psi.PsiMethodCallExpression
+import com.intellij.psi.PsiModifier
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.psi.search.searches.AllClassesSearch
 
@@ -31,32 +32,38 @@ class GraphDataExtractor(private val project: Project) {
         GraphData(nodes.values.toList(), edges)
     }
 
-    private fun addStructureNodes(
-        psiClass: PsiClass,
-        nodes: MutableMap<String, GraphNode>,
-        edges: MutableList<GraphEdge>
-    ) {
-        val file = psiClass.containingFile ?: return
-        val filePath = file.virtualFile?.path ?: return
-        val qualifiedName = psiClass.qualifiedName ?: psiClass.name ?: return
+  private fun addStructureNodes(
+    psiClass: PsiClass,
+    nodes: MutableMap<String, GraphNode>,
+    edges: MutableList<GraphEdge>
+  ) {
+    val file = psiClass.containingFile ?: return
+    val filePath = file.virtualFile?.path ?: return
+    val qualifiedName = psiClass.qualifiedName ?: psiClass.name ?: return
 
-        val fileId = "file:$filePath"
-        nodes.getOrPut(fileId) { GraphNode(fileId, file.name, "file", filePath) }
-
-        val classId = "class:$qualifiedName"
-        if (!nodes.containsKey(classId)) {
-            nodes[classId] = GraphNode(classId, psiClass.name ?: "?", "class", filePath)
-            edges += GraphEdge(fileId, classId, "contains")
-        }
-
-        psiClass.methods.forEach { method ->
-            val methodId = "method:$qualifiedName.${method.name}"
-            if (!nodes.containsKey(methodId)) {
-                nodes[methodId] = GraphNode(methodId, method.name, "method", filePath)
-                edges += GraphEdge(classId, methodId, "contains")
-            }
-        }
+    // 1. Determine the exact type
+    val classType = when {
+      psiClass.isInterface -> "interface"
+      psiClass.hasModifierProperty(PsiModifier.ABSTRACT) -> "abstract"
+      else -> "class"
     }
+
+    // 2. Create the node using the new 'classType' variable!
+    // Notice how the fileId creation and file edge are completely deleted.
+    val classId = "class:$qualifiedName"
+    if (!nodes.containsKey(classId)) {
+      nodes[classId] = GraphNode(classId, psiClass.name ?: "?", classType, filePath)
+    }
+
+    // 3. Attach methods
+    psiClass.methods.forEach { method ->
+      val methodId = "method:$qualifiedName.${method.name}"
+      if (!nodes.containsKey(methodId)) {
+        nodes[methodId] = GraphNode(methodId, method.name, "method", filePath)
+        edges += GraphEdge(classId, methodId, "contains")
+      }
+    }
+  }
 
     private fun addCallEdges(
         psiClass: PsiClass,
