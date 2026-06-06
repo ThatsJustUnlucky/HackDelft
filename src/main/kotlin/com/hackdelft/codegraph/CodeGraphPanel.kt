@@ -1,5 +1,6 @@
 package com.hackdelft.codegraph
 
+import com.google.gson.JsonParser
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -7,6 +8,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.pom.Navigatable
 import com.intellij.psi.JavaPsiFacade
+import com.intellij.psi.PsiElement
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
@@ -19,8 +21,13 @@ class CodeGraphPanel(private val project: Project) {
   val component: JPanel = JPanel(BorderLayout())
   private val browser = JBCefBrowser()
   private val extractor = GraphDataExtractor(project)
+  private val cache = GraphCache(project)
+  private val aiService = AIExplainService()
   private val jsQuery = JBCefJSQuery.create(browser)
   private val bg = Executors.newSingleThreadExecutor()
+
+  @Volatile
+  private var currentGraph: GraphData? = null
 
   companion object {
     private val instances = mutableMapOf<Project, CodeGraphPanel>()
@@ -30,15 +37,20 @@ class CodeGraphPanel(private val project: Project) {
   init {
     instances[project] = this
 
-    jsQuery.addHandler { nodeId ->
-      navigateTo(nodeId)
+    jsQuery.addHandler { msg ->
+      handleMessage(msg)
       null
     }
 
     browser.jbCefClient.addLoadHandler(object : org.cef.handler.CefLoadHandlerAdapter() {
       override fun onLoadEnd(b: org.cef.browser.CefBrowser?, frame: org.cef.browser.CefFrame?, code: Int) {
         if (frame?.isMain == true) {
-          val bridge = "window.navigateToNode=function(id){${jsQuery.inject("id")}};"
+          val bridge = """
+            window.codemapSend=function(m){${jsQuery.inject("m")}};
+            window.navigateToNode=function(id){window.codemapSend(JSON.stringify({t:'nav',id:id}));};
+            window.explainNode=function(id){window.codemapSend(JSON.stringify({t:'explain',id:id}));};
+            window.codemapRefresh=function(){window.codemapSend(JSON.stringify({t:'refresh'}));};
+          """.trimIndent()
           browser.cefBrowser.executeJavaScript(bridge, "", 0)
           refreshGraph()
         }
@@ -54,14 +66,74 @@ class CodeGraphPanel(private val project: Project) {
     browser.cefBrowser.executeJavaScript("focusNode(\"$escaped\");", "", 0)
   }
 
-  fun refreshGraph() {
+  fun refreshGraph(force: Boolean = false) {
     bg.submit {
       try {
-        val data = extractor.extract()
-        val json = toJson(data)
-        browser.cefBrowser.executeJavaScript("updateGraph($json);", "", 0)
+        val data = if (force) extractAndCache() else (cache.load() ?: extractAndCache())
+        currentGraph = data
+        browser.cefBrowser.executeJavaScript("updateGraph(${toJson(data)});", "", 0)
       } catch (_: Exception) {}
     }
+  }
+
+  /** Flow 2/3: build a focused subgraph around [nodeId], ask the AI for typed steps, push to the UI. */
+  fun explainNode(nodeId: String) {
+    bg.submit {
+      try {
+        val full = currentGraph ?: extractAndCache().also { currentGraph = it }
+        val focused = FocusedSubgraphExtractor.extract(full, nodeId)
+        val snippets = collectSnippets(focused)
+        val response = aiService.explain(nodeId, focused, snippets)
+        browser.cefBrowser.executeJavaScript("showExplanation(${explanationToJson(response)});", "", 0)
+        focusNode(nodeId)
+      } catch (_: Exception) {}
+    }
+  }
+
+  private fun extractAndCache(): GraphData = extractor.extract().also { cache.save(it) }
+
+  private fun handleMessage(msg: String) {
+    val obj = try { JsonParser.parseString(msg).asJsonObject } catch (_: Exception) { return }
+    when (obj.get("t")?.asString) {
+      "nav" -> obj.get("id")?.asString?.let { navigateTo(it) }
+      "explain" -> obj.get("id")?.asString?.let { explainNode(it) }
+      "refresh" -> refreshGraph(force = true)
+    }
+  }
+
+  private fun collectSnippets(focused: GraphData): Map<String, String> =
+    ReadAction.compute<Map<String, String>, Exception> {
+      val out = LinkedHashMap<String, String>()
+      for (n in focused.nodes.take(8)) {
+        val text = resolvePsi(n.id)?.text ?: continue
+        out[n.id] = text.take(600)
+      }
+      out
+    }
+
+  private fun resolvePsi(nodeId: String): PsiElement? {
+    val facade = JavaPsiFacade.getInstance(project)
+    val scope = GlobalSearchScope.projectScope(project)
+    return when {
+      nodeId.startsWith("class:") -> facade.findClass(nodeId.removePrefix("class:"), scope)
+      nodeId.startsWith("method:") -> {
+        val rest = nodeId.removePrefix("method:")
+        val dot = rest.lastIndexOf('.')
+        if (dot < 0) null
+        else facade.findClass(rest.substring(0, dot), scope)
+          ?.findMethodsByName(rest.substring(dot + 1), false)?.firstOrNull()
+      }
+      else -> null
+    }
+  }
+
+  private fun explanationToJson(r: AIExplanationResponse): String {
+    val steps = r.steps.joinToString(",") { s ->
+      val fn = s.focusNodes.joinToString(",") { "\"${it.e()}\"" }
+      """{"id":"${s.id.e()}","title":"${s.title.e()}","type":"${s.type.e()}","explanation":"${s.explanation.e()}","focusNodes":[$fn]}"""
+    }
+    val risks = r.riskNotes.joinToString(",") { "\"${it.e()}\"" }
+    return """{"summary":"${r.summary.e()}","steps":[$steps],"riskNotes":[$risks]}"""
   }
 
   private fun navigateTo(nodeId: String) {
@@ -135,19 +207,53 @@ body{display:flex;flex-direction:column}
 .legend{display:flex;align-items:center;gap:5px;color:#565f89;font-size:11px}
 .dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
 .dash{width:16px;height:3px;border-radius:2px;flex-shrink:0}
+#btn-explain{border-color:#bb9af7;color:#bb9af7}
+#btn-explain:hover{background:#2a1f3d}
+#steppanel{position:fixed;top:52px;right:0;bottom:32px;width:340px;background:#16161e;border-left:1px solid #2a2b3d;display:flex;flex-direction:column;z-index:10;box-shadow:-4px 0 16px rgba(0,0,0,.35)}
+#steppanel.hidden{display:none}
+#sp-head{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #2a2b3d}
+#sp-title{color:#bb9af7;font-weight:600;font-size:13px}
+.sp-x{background:none;border:none;color:#565f89;cursor:pointer;font-size:14px}
+.sp-x:hover{color:#f7768e}
+#sp-summary{flex-shrink:0;padding:12px 14px;color:#a9b1d6;font-size:12px;line-height:1.5;border-bottom:1px solid #2a2b3d}
+#sp-steps{flex:1;overflow:auto;padding:8px}
+.sp-step{background:#1e1f2e;border:1px solid #2a2b3d;border-radius:8px;padding:10px;margin-bottom:8px;cursor:pointer;transition:all .15s}
+.sp-step:hover{border-color:#7aa2f7}
+.sp-step.active{border-color:#7aa2f7;background:#1d3054}
+.sp-step-h{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.sp-badge{font-size:9px;font-weight:700;color:#16161e;padding:2px 7px;border-radius:10px;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
+.sp-step-t{color:#c0caf5;font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sp-step-e{color:#787c99;font-size:11px;line-height:1.5}
+#sp-risks{flex-shrink:0;padding:0 14px;color:#e0af68;font-size:11px;line-height:1.5;max-height:90px;overflow:auto}
+#sp-risks:empty{display:none}
+#sp-actions{flex-shrink:0;padding:10px 14px;border-top:1px solid #2a2b3d}
+#sp-actions .btn{width:100%}
 </style></head><body>
 
 <div id="topbar">
   <input id="search" type="text" placeholder="Search nodes..." oninput="searchNodes(this.value)">
   <div class="sep"></div>
+  <button class="btn" id="btn-explain" onclick="explainSelected()">✨ Explain</button>
   <button class="btn" onclick="cy.fit(null,40)">Fit All</button>
   <button class="btn" id="btn-struct" onclick="togBtn('contains','btn-struct')">Hide Structure</button>
   <button class="btn" id="btn-calls" onclick="togBtn('calls','btn-calls')">Hide Calls</button>
   <button class="btn" onclick="layout()">Re-layout</button>
   <button class="btn" onclick="resetView()">Reset</button>
+  <button class="btn" onclick="window.codemapRefresh&&window.codemapRefresh()">Refresh</button>
 </div>
 
 <div id="cy"></div>
+
+<div id="steppanel" class="hidden">
+  <div id="sp-head">
+    <span id="sp-title">✨ CodeMap Focus</span>
+    <button class="sp-x" onclick="closePanel()">✕</button>
+  </div>
+  <div id="sp-summary"></div>
+  <div id="sp-steps"></div>
+  <div id="sp-risks"></div>
+  <div id="sp-actions"><button class="btn" onclick="showAllSteps()">Show All Steps</button></div>
+</div>
 
 <div id="statusbar">
   <div class="legend"><div class="dot" style="background:#ff9e64; border-radius:4px"></div>Class</div>
@@ -164,6 +270,11 @@ body{display:flex;flex-direction:column}
 // FIX 2: State variables moved to the top so they aren't 'undefined' when Search resets
 var hidden = {};
 var hiddenNodes = {};
+var selectedNodeId = null;
+var currentSteps = [];
+var TYPE_COLORS = {input:'#7dcfff',validation:'#e0af68',processing:'#7aa2f7',persistence:'#9ece6a','external-call':'#bb9af7',ui:'#2ac3de','error-handling':'#f7768e',test:'#9ece6a',orchestration:'#bb9af7',unknown:'#c0caf5'};
+function colorByType(t){return TYPE_COLORS[t]||'#c0caf5';}
+function escapeHtml(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
 var cy=cytoscape({
   container:document.getElementById('cy'),
@@ -224,7 +335,9 @@ var cy=cytoscape({
     {selector:'node:selected',style:{'border-width':3,'border-color':'#ffffff','shadow-blur':15,'shadow-color':'#ffffff','shadow-opacity':0.8}},
     {selector:'.dim',style:{opacity:0.07}},
     {selector:'.highlight',style:{'border-color':'#ffffff','border-width':3}},
-    {selector:'.search-match',style:{'border-color':'#ffffff','border-width':3}}
+    {selector:'.search-match',style:{'border-color':'#ffffff','border-width':3}},
+    {selector:'.stepglow',style:{'border-width':4,'shadow-blur':20,'shadow-color':'#ffffff','shadow-opacity':0.55,'z-index':300}},
+    {selector:'.stepedge',style:{'line-color':'#ffffff','target-arrow-color':'#ffffff','width':3,'opacity':1,'z-index':300}}
   ],
   layout:{name:'cose'}
 });
@@ -368,6 +481,7 @@ function toggleNodes(nodeType, btnId) {
 cy.on('tap','node',function(e){
   cy.elements().removeClass('dim highlight');
   var node=e.target;
+  selectedNodeId=node.id();
   cy.elements().not(node.closedNeighborhood()).addClass('dim');
   node.addClass('highlight');
   document.getElementById('selected-info').textContent='▶ '+node.data('label')+' ('+node.data('type')+')';
@@ -375,9 +489,103 @@ cy.on('tap','node',function(e){
 });
 cy.on('tap',function(e){
   if(e.target===cy){
+    selectedNodeId=null;
     cy.elements().removeClass('dim highlight');
     document.getElementById('selected-info').textContent='';
   }
 });
+
+// ---- AI Explain focus mode (steps + animations) ----
+function explainSelected(){
+  if(!selectedNodeId){document.getElementById('selected-info').textContent='Select a node first, then Explain';return;}
+  openPanelLoading();
+  if(window.explainNode)window.explainNode(selectedNodeId);
+}
+
+function openPanelLoading(){
+  document.getElementById('steppanel').classList.remove('hidden');
+  document.getElementById('sp-summary').textContent='Generating explanation…';
+  document.getElementById('sp-steps').innerHTML='';
+  document.getElementById('sp-risks').innerHTML='';
+}
+
+function showExplanation(resp){
+  currentSteps=(resp&&resp.steps)||[];
+  document.getElementById('steppanel').classList.remove('hidden');
+  document.getElementById('sp-summary').textContent=(resp&&resp.summary)||'';
+  var html='';
+  currentSteps.forEach(function(s,i){
+    var c=colorByType(s.type);
+    html+='<div class="sp-step" onclick="playStep('+i+')">'
+      +'<div class="sp-step-h"><span class="sp-badge" style="background:'+c+'">'+escapeHtml(s.type)+'</span>'
+      +'<span class="sp-step-t">'+(i+1)+'. '+escapeHtml(s.title)+'</span></div>'
+      +'<div class="sp-step-e">'+escapeHtml(s.explanation)+'</div></div>';
+  });
+  document.getElementById('sp-steps').innerHTML=html;
+  var risks=(resp&&resp.riskNotes)||[];
+  document.getElementById('sp-risks').innerHTML=risks.length?('⚠ '+risks.map(escapeHtml).join('<br>⚠ ')):'';
+  if(currentSteps.length)playStep(0);
+}
+
+function stepNodes(s){
+  var nodes=cy.collection();
+  (s.focusNodes||[]).forEach(function(id){nodes=nodes.union(cy.getElementById(id));});
+  return nodes;
+}
+
+function pulse(nodes){
+  nodes.forEach(function(n){
+    n.stop();
+    n.animate({style:{'border-width':9}},{duration:350,complete:function(){
+      n.animate({style:{'border-width':4}},{duration:350});
+    }});
+  });
+}
+
+function clearStepStyles(){
+  cy.elements().removeClass('dim stepglow stepedge');
+  cy.nodes().removeStyle('border-color border-width');
+}
+
+function playStep(i){
+  var s=currentSteps[i];
+  if(!s)return;
+  var items=document.querySelectorAll('.sp-step');
+  for(var k=0;k<items.length;k++)items[k].classList.toggle('active',k===i);
+  clearStepStyles();
+  var nodes=stepNodes(s);
+  if(nodes.length===0)return;
+  var nb=nodes.closedNeighborhood();
+  cy.elements().not(nb).addClass('dim');
+  var color=colorByType(s.type);
+  nodes.style('border-color',color);
+  nodes.addClass('stepglow');
+  nodes.edgesWith(nodes).addClass('stepedge');
+  pulse(nodes);
+  cy.animate({fit:{eles:nb,padding:90}},{duration:450});
+}
+
+function showAllSteps(){
+  clearStepStyles();
+  var all=cy.collection();
+  currentSteps.forEach(function(s){
+    var color=colorByType(s.type);
+    stepNodes(s).forEach(function(n){
+      if(n.length){n.style('border-color',color);n.addClass('stepglow');all=all.union(n);}
+    });
+  });
+  if(all.length===0)return;
+  var nb=all.closedNeighborhood();
+  cy.elements().not(nb).addClass('dim');
+  cy.animate({fit:{eles:nb,padding:80}},{duration:450});
+  var items=document.querySelectorAll('.sp-step');
+  for(var k=0;k<items.length;k++)items[k].classList.remove('active');
+}
+
+function closePanel(){
+  document.getElementById('steppanel').classList.add('hidden');
+  clearStepStyles();
+  resetView();
+}
 </script></body></html>"""
 }

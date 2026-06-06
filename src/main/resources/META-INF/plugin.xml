@@ -22,5 +22,11 @@
                 description="Highlight this method in the Code Graph tool window">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
         </action>
+        <action id="com.hackdelft.codegraph.ExplainWithCodeMapAction"
+                class="com.hackdelft.codegraph.ExplainWithCodeMapAction"
+                text="Explain with CodeMap"
+                description="Generate an AI step-by-step explanation of this method/class in the Code Graph">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
     </actions>
 </idea-plugin>

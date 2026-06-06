@@ -27,6 +27,34 @@ The core product idea is:
 
 ---
 
+## Current Implementation Status
+
+Kotlin IntelliJ plugin (`src/main/kotlin/com/hackdelft/codegraph/`) with a Cytoscape.js frontend embedded in a JCEF tool window. Build: Gradle 8.6, JDK 17 toolchain, IntelliJ 2023.2.5, `org.jetbrains.intellij` 1.17.4. Run with `./gradlew runIde` (the Gradle wrapper is committed).
+
+### Implemented
+
+- **Repo graph (Flow 1):** `GraphDataExtractor` uses PSI (`AllClassesSearch`) to build a deterministic graph of classes, interfaces, abstract classes, and methods, with `contains` / `calls` / `inherits` edges. Rendered by `CodeGraphPanel` (Cytoscape): search, structure/calls filters, per-class colors, click-to-navigate, right-click "Open in Graph View".
+- **Local cache (Layer 1):** `GraphCache` reads/writes `.codemap/cache.json` (gitignored). `refreshGraph()` loads the cache or extracts; the "Refresh" button forces re-extract.
+- **Focused subgraph (Layer 2):** `FocusedSubgraphExtractor.extract(full, selectedId)` filters the full graph to ~24 nodes around a selection (1–2 hops + containing classes). Deterministic; no AI.
+- **AI explanation (Layer 3):** `AIExplainService` builds a prompt from the focused subgraph + code snippets + allowed step types, calls OpenAI (`gpt-4o-mini`, JSON mode), parses, and validates every `focusNodes` id against the real subgraph (unknown types → `unknown`). Falls back to a deterministic offline mock when `OPENAI_API_KEY` is unset or the call fails. Contracts in `ExplanationModels.kt` (`AIExplanationStep`, `AIExplanationResponse`).
+- **Step panel + animations (Layer 4):** In `CodeGraphPanel`'s embedded HTML — a side panel lists typed steps; `playStep` / `showAllSteps` glow/dim/animate the relevant nodes and edges, colored by step type (`TYPE_COLORS`). Frontend owns all animation; AI returns only a type string + node ids.
+- **Actions:** "Explain with CodeMap" (editor right-click → `ExplainWithCodeMapAction`) and "✨ Explain" (graph toolbar). Both route to `CodeGraphPanel.explainNode(nodeId)`.
+
+### Key conventions
+
+- Node ids: `class:<qualifiedName>`, `method:<qualifiedName>.<name>`. Edge types: `contains`, `calls`, `inherits`.
+- JS↔Kotlin bridge: one `JBCefJSQuery`; frontend posts `{t:'nav'|'explain'|'refresh', id}`, routed by `handleMessage`.
+- Step-type taxonomy is single-sourced in `AIExplainService.ALLOWED_TYPES`; mirror any new type into `TYPE_COLORS` in the HTML so it gets a color (else grey fallback).
+- AI prompts live only in `AIExplainService` (`buildPrompt` = user prompt; system line in `callOpenAI`). Model/endpoint are constants in that file.
+
+### Not yet done
+
+- Richer node kinds (folders/files/external deps per the data contracts) — extractor is class/method only.
+- AI `focusEdges` are parsed but unused; step animations derive edges from `focusNodes`.
+- Cold-start race: editor "Explain" on a never-opened tool window can fire before the web page finishes loading.
+
+---
+
 ## Core Principle
 
 The graph is deterministic.
@@ -431,6 +459,29 @@ Suggested order:
 10. Add OpenAI API call.
 11. Validate AI response.
 12. Polish demo flow.
+
+---
+
+## Development Environment
+
+The project can be developed from VS Code as a Kotlin/Gradle workspace.
+
+Current VS Code support lives in `.vscode/`:
+
+- `extensions.json` recommends Kotlin, Java, and Gradle extensions.
+- `settings.json` enables Gradle wrapper import and Kotlin language server support.
+- `tasks.json` provides `Gradle: build`, `Gradle: run IDE`, and `Gradle: run IDE debug`.
+- `launch.json` provides `Attach to Gradle runIde` for attaching to `runIde --debug-jvm` on port `5005`.
+
+Main local commands:
+
+```powershell
+.\gradlew.bat compileKotlin
+.\gradlew.bat runIde
+.\gradlew.bat runIde --debug-jvm
+```
+
+`compileKotlin` has been verified after adding the VS Code workspace files. A full `build` may fail if the IntelliJ sandbox plugin jar is locked by a running sandbox IDE process.
 
 ---
 
