@@ -22,7 +22,7 @@ class CodeGraphPanel(private val project: Project) {
   private val browser = JBCefBrowser()
   private val extractor = GraphDataExtractor(project)
   private val cache = GraphCache(project)
-  private val aiService = AIExplainService()
+  private val aiService = AIExplainService(project.basePath)
   private val jsQuery = JBCefJSQuery.create(browser)
   private val bg = Executors.newSingleThreadExecutor()
 

@@ -14,7 +14,7 @@ import java.time.Duration
 // Reads the key from OPENAI_API_KEY, -Dopenai.api.key, or a local .env file. With no key
 // (or any failure) it falls back to a deterministic offline mock so the demo always works.
 // Every response is validated against the real graph node ids before it leaves this class.
-class AIExplainService {
+class AIExplainService(private val projectBasePath: String? = null) {
 
   companion object {
     // Configurable step-type taxonomy (kept as plain strings, not a hard enum).
@@ -37,8 +37,8 @@ class AIExplainService {
       val explanation = parse(callExplanationModel(key, buildPrompt(selectedId, focused, snippets)))
       val typed = classifyStepTypes(key, explanation, focused, selectedId)
       validate(typed, focused, selectedId)
-    } catch (_: Exception) {
-      mock(selectedId, focused)
+    } catch (e: Exception) {
+      mock(selectedId, focused, "OpenAI request failed: ${e.message ?: e.javaClass.simpleName}")
     }
   }
 
@@ -82,7 +82,6 @@ $snipStr
       key = key,
       model = EXPLANATION_MODEL,
       reasoningEffort = EXPLANATION_REASONING_EFFORT,
-      temperature = "0.2",
       timeout = Duration.ofSeconds(60),
       systemMessage = "You are a precise code explanation assistant that returns only valid JSON.",
       prompt = prompt
@@ -93,7 +92,6 @@ $snipStr
       key = key,
       model = TYPE_MODEL,
       reasoningEffort = null,
-      temperature = "0.0",
       timeout = Duration.ofSeconds(20),
       systemMessage = "You classify explanation steps into an allowed taxonomy and return only valid JSON.",
       prompt = prompt
@@ -103,13 +101,12 @@ $snipStr
     key: String,
     model: String,
     reasoningEffort: String?,
-    temperature: String,
     timeout: Duration,
     systemMessage: String,
     prompt: String
   ): String {
     val reasoningField = reasoningEffort?.let { ""","reasoning_effort":"${it.j()}"""" } ?: ""
-    val body = """{"model":"${model.j()}"$reasoningField,"temperature":$temperature,"response_format":{"type":"json_object"},"messages":[{"role":"system","content":"${systemMessage.j()}"},{"role":"user","content":"${prompt.j()}"}]}"""
+    val body = """{"model":"${model.j()}"$reasoningField,"response_format":{"type":"json_object"},"messages":[{"role":"system","content":"${systemMessage.j()}"},{"role":"user","content":"${prompt.j()}"}]}"""
     val req = HttpRequest.newBuilder()
       .uri(URI.create(ENDPOINT))
       .header("Authorization", "Bearer $key")
@@ -118,7 +115,7 @@ $snipStr
       .POST(HttpRequest.BodyPublishers.ofString(body, Charsets.UTF_8))
       .build()
     val resp = http.send(req, HttpResponse.BodyHandlers.ofString())
-    if (resp.statusCode() !in 200..299) throw RuntimeException("OpenAI ${resp.statusCode()}")
+    if (resp.statusCode() !in 200..299) throw RuntimeException("OpenAI ${resp.statusCode()}: ${openAIError(resp.body())}")
     return JsonParser.parseString(resp.body()).asJsonObject
       .getAsJsonArray("choices").get(0).asJsonObject
       .getAsJsonObject("message").get("content").asString
@@ -220,7 +217,11 @@ Return JSON only:
 
   // --- offline fallback ---
 
-  private fun mock(selectedId: String, focused: GraphData): AIExplanationResponse {
+  private fun mock(
+    selectedId: String,
+    focused: GraphData,
+    riskNote: String = "Set OPENAI_API_KEY for AI-generated explanations."
+  ): AIExplanationResponse {
     val byId = focused.nodes.associateBy { it.id }
     val sel = byId[selectedId]
     val selLabel = sel?.label ?: selectedId
@@ -244,7 +245,7 @@ Return JSON only:
     return AIExplanationResponse(
       summary = "Offline overview of $selLabel and ${neighbors.size} related nodes.",
       steps = steps,
-      riskNotes = listOf("Set OPENAI_API_KEY for AI-generated explanations."),
+      riskNotes = listOf(riskNote),
       suggestedNextNodes = neighbors.take(3)
     )
   }
@@ -252,10 +253,11 @@ Return JSON only:
   private fun loadApiKey(): String? =
     System.getenv("OPENAI_API_KEY")?.takeIf { it.isNotBlank() }
       ?: System.getProperty("openai.api.key")?.takeIf { it.isNotBlank() }
-      ?: readDotEnvApiKey()
+      ?: readDotEnvApiKey(projectBasePath?.let { Path.of(it) })
+      ?: readDotEnvApiKey(Path.of(System.getProperty("user.dir")))
 
-  private fun readDotEnvApiKey(): String? {
-    var dir: Path? = Path.of(System.getProperty("user.dir")).toAbsolutePath()
+  private fun readDotEnvApiKey(startPath: Path?): String? {
+    var dir: Path? = startPath?.toAbsolutePath()
     repeat(8) {
       val envFile = dir?.resolve(".env")
       if (envFile != null && Files.isRegularFile(envFile)) {
@@ -270,6 +272,16 @@ Return JSON only:
     }
     return null
   }
+
+  private fun openAIError(body: String): String =
+    try {
+      JsonParser.parseString(body).asJsonObject
+        .getAsJsonObject("error")
+        ?.str("message")
+        ?: body.take(300)
+    } catch (_: Exception) {
+      body.take(300)
+    }
 
   // JSON string-escape for hand-built request bodies / prompts.
   private fun String.j() =
