@@ -36,7 +36,7 @@ Kotlin IntelliJ plugin (`src/main/kotlin/com/hackdelft/codegraph/`) with a Cytos
 - **Repo graph (Flow 1):** `GraphDataExtractor` uses PSI (`AllClassesSearch`) to build a deterministic graph of classes, interfaces, abstract classes, and methods, with `contains` / `calls` / `inherits` edges. Rendered by `CodeGraphPanel` (Cytoscape): search, structure/calls filters, per-class colors, click-to-navigate, right-click "Open in Graph View".
 - **Local cache (Layer 1):** `GraphCache` reads/writes `.codemap/cache.json` (gitignored). `refreshGraph()` loads the cache or extracts; the "Refresh" button forces re-extract.
 - **Focused subgraph (Layer 2):** `FocusedSubgraphExtractor.extract(full, selectedId)` filters the full graph to ~24 nodes around a selection (1–2 hops + containing classes). Deterministic; no AI.
-- **AI explanation (Layer 3):** `AIExplainService` builds a prompt from the focused subgraph + code snippets + allowed step types, calls OpenAI (`gpt-4o-mini`, JSON mode), parses, and validates every `focusNodes` id against the real subgraph (unknown types → `unknown`). Falls back to a deterministic offline mock when `OPENAI_API_KEY` is unset or the call fails. Contracts in `ExplanationModels.kt` (`AIExplanationStep`, `AIExplanationResponse`).
+- **AI explanation (Layer 3):** `AIExplainService` first builds a high-compute explanation prompt from the focused subgraph + code snippets, calls OpenAI with `gpt-5.5` (`reasoning_effort: high`, JSON mode), and asks the explanation pass to leave step types as `unknown`. It then runs a lightweight type-classification pass with `gpt-5.4-nano` to assign one allowed step type per step. The backend parses the result and validates every `focusNodes` id against the real subgraph (unknown/unsupported types -> `unknown`). The API key is loaded from `OPENAI_API_KEY`, `-Dopenai.api.key`, or the project `.env`; the service falls back to a deterministic offline mock when no key is available or the explanation request fails. Contracts in `ExplanationModels.kt` (`AIExplanationStep`, `AIExplanationResponse`).
 - **Step panel + animations (Layer 4):** In `CodeGraphPanel`'s embedded HTML — a side panel lists typed steps; `playStep` / `showAllSteps` glow/dim/animate the relevant nodes and edges, colored by step type (`TYPE_COLORS`). Frontend owns all animation; AI returns only a type string + node ids.
 - **Actions:** "Explain with CodeMap" (editor right-click → `ExplainWithCodeMapAction`) and "✨ Explain" (graph toolbar). Both route to `CodeGraphPanel.explainNode(nodeId)`.
 
@@ -45,7 +45,7 @@ Kotlin IntelliJ plugin (`src/main/kotlin/com/hackdelft/codegraph/`) with a Cytos
 - Node ids: `class:<qualifiedName>`, `method:<qualifiedName>.<name>`. Edge types: `contains`, `calls`, `inherits`.
 - JS↔Kotlin bridge: one `JBCefJSQuery`; frontend posts `{t:'nav'|'explain'|'refresh', id}`, routed by `handleMessage`.
 - Step-type taxonomy is single-sourced in `AIExplainService.ALLOWED_TYPES`; mirror any new type into `TYPE_COLORS` in the HTML so it gets a color (else grey fallback).
-- AI prompts live only in `AIExplainService` (`buildPrompt` = user prompt; system line in `callOpenAI`). Model/endpoint are constants in that file.
+- AI prompts live only in `AIExplainService` (`buildPrompt` = explanation prompt; `buildTypePrompt` = step-type classifier prompt; system messages in `callExplanationModel` / `callTypeModel`). Model/endpoint constants live in that file. Current GPT-5.x chat-completion calls should not set non-default `temperature`.
 
 ### Not yet done
 
@@ -239,7 +239,7 @@ Backend responsibilities:
 - Cache and load the repo graph from local project files.
 - Extract a focused subgraph around the selected node.
 - Collect short relevant code snippets for AI context.
-- Call the OpenAI API using the provided hackathon key.
+- Call the OpenAI API using the provided hackathon key from `OPENAI_API_KEY`, `-Dopenai.api.key`, or the project `.env`. Do not commit real API keys.
 - Ask AI for JSON only.
 - Validate AI response against known node IDs and edge IDs.
 - Send graph data and AI explanation data to the frontend.
@@ -345,6 +345,11 @@ Keep them stable and simple.
 
 ## AI Rules
 
+The current implementation uses two AI passes:
+
+1. Explanation pass: `gpt-5.5` with `reasoning_effort: high` receives the selected node, focused graph, and relevant snippets; it returns JSON explanation steps with `type` set to `unknown`.
+2. Type-selection pass: `gpt-5.4-nano` receives the generated steps plus allowed/configured step types; it returns JSON mapping each existing step id to exactly one allowed type.
+
 AI should receive:
 
 - selected node
@@ -376,7 +381,7 @@ The backend must validate:
 
 ## Suggested AI Prompt Shape
 
-Use this as the general shape, not necessarily the final exact prompt:
+Use this as the general shape, not necessarily the final exact prompt. The current implementation splits explanation generation and step-type selection into separate prompts.
 
 ```text
 You are helping a developer understand a selected part of a codebase.
@@ -389,10 +394,7 @@ Return JSON only.
 
 Create a short step-by-step explanation of how the selected node interacts with the rest of the focused graph.
 
-Allowed step types:
-{{allowedStepTypes}}
-
-If no type fits, use "unknown".
+Set every step type to "unknown". A separate lightweight classifier will assign step types.
 
 Each step must include:
 - id
@@ -410,6 +412,12 @@ Focused graph:
 
 Relevant snippets:
 {{snippets}}
+```
+
+The classifier prompt should receive the generated steps and the allowed step-type list, then return JSON like:
+
+```json
+{"steps":[{"id":"existing step id","type":"one allowed step type"}]}
 ```
 
 ---
