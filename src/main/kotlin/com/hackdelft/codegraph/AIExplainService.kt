@@ -6,12 +6,14 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Duration
 
 // Layer 3: turn a focused subgraph into typed, ordered explanation steps.
-// Reads the key from OPENAI_API_KEY. With no key (or any failure) it falls back to a
-// deterministic offline mock so the demo always works. Every response is validated against
-// the real graph node ids before it leaves this class.
+// Reads the key from OPENAI_API_KEY, -Dopenai.api.key, or a local .env file. With no key
+// (or any failure) it falls back to a deterministic offline mock so the demo always works.
+// Every response is validated against the real graph node ids before it leaves this class.
 class AIExplainService {
 
   companion object {
@@ -20,11 +22,12 @@ class AIExplainService {
       "input", "validation", "processing", "persistence",
       "external-call", "ui", "error-handling", "test", "orchestration", "unknown"
     )
-    private const val MODEL = "gpt-4o-mini"
+    private const val MODEL = "gpt-5.5"
+    private const val REASONING_EFFORT = "medium"
     private const val ENDPOINT = "https://api.openai.com/v1/chat/completions"
   }
 
-  private val apiKey: String? = System.getenv("OPENAI_API_KEY")?.takeIf { it.isNotBlank() }
+  private val apiKey: String? = loadApiKey()
   private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build()
 
   fun explain(selectedId: String, focused: GraphData, snippets: Map<String, String>): AIExplanationResponse {
@@ -75,7 +78,7 @@ $snipStr
   // --- OpenAI call ---
 
   private fun callOpenAI(key: String, prompt: String): String {
-    val body = """{"model":"$MODEL","temperature":0.2,"response_format":{"type":"json_object"},"messages":[{"role":"system","content":"You are a precise code explanation assistant that returns only valid JSON."},{"role":"user","content":"${prompt.j()}"}]}"""
+    val body = """{"model":"$MODEL","reasoning_effort":"$REASONING_EFFORT","temperature":0.2,"response_format":{"type":"json_object"},"messages":[{"role":"system","content":"You are a precise code explanation assistant that returns only valid JSON."},{"role":"user","content":"${prompt.j()}"}]}"""
     val req = HttpRequest.newBuilder()
       .uri(URI.create(ENDPOINT))
       .header("Authorization", "Bearer $key")
@@ -161,6 +164,28 @@ $snipStr
       riskNotes = listOf("Set OPENAI_API_KEY for AI-generated explanations."),
       suggestedNextNodes = neighbors.take(3)
     )
+  }
+
+  private fun loadApiKey(): String? =
+    System.getenv("OPENAI_API_KEY")?.takeIf { it.isNotBlank() }
+      ?: System.getProperty("openai.api.key")?.takeIf { it.isNotBlank() }
+      ?: readDotEnvApiKey()
+
+  private fun readDotEnvApiKey(): String? {
+    var dir: Path? = Path.of(System.getProperty("user.dir")).toAbsolutePath()
+    repeat(8) {
+      val envFile = dir?.resolve(".env")
+      if (envFile != null && Files.isRegularFile(envFile)) {
+        Files.readAllLines(envFile).forEach { line ->
+          val trimmed = line.trim()
+          if (trimmed.startsWith("OPENAI_API_KEY=")) {
+            return trimmed.substringAfter("=").trim().trim('"', '\'').takeIf { it.isNotBlank() }
+          }
+        }
+      }
+      dir = dir?.parent
+    }
+    return null
   }
 
   // JSON string-escape for hand-built request bodies / prompts.
