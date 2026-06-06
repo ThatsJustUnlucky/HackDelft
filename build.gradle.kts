@@ -26,4 +26,16 @@ tasks {
         sinceBuild.set("232")
         untilBuild.set("243.*")
     }
+
+    runIde {
+        val envFile = file(".env")
+        if (envFile.exists()) {
+            envFile.readLines()
+                .firstOrNull { it.startsWith("OPENAI_API_KEY=") }
+                ?.substringAfter("=")
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { key -> jvmArgs("-Dopenai.api.key=$key") }
+        }
+    }
 }
