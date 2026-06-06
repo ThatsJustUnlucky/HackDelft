@@ -14,4 +14,13 @@
                 anchor="right"
                 factoryClass="com.hackdelft.codegraph.CodeGraphToolWindowFactory"/>
     </extensions>
+
+    <actions>
+        <action id="com.hackdelft.codegraph.OpenInGraphViewAction"
+                class="com.hackdelft.codegraph.OpenInGraphViewAction"
+                text="Open in Graph View"
+                description="Highlight this method in the Code Graph tool window">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+        </action>
+    </actions>
 </idea-plugin>
