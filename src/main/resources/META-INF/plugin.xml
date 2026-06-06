@@ -1,0 +1,17 @@
+<idea-plugin>
+    <id>com.hackdelft.codegraph</id>
+    <name>Code Graph</name>
+    <vendor>HackDelft 2026</vendor>
+    <description>Obsidian-like interactive graph of your codebase — files, classes, and method call relationships.</description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow
+                id="Code Graph"
+                secondary="false"
+                anchor="right"
+                factoryClass="com.hackdelft.codegraph.CodeGraphToolWindowFactory"/>
+    </extensions>
+</idea-plugin>
