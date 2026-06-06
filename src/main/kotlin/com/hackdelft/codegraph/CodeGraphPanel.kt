@@ -12,7 +12,6 @@ import com.intellij.ui.jcef.JBCefBrowser
 import com.intellij.ui.jcef.JBCefJSQuery
 import java.awt.BorderLayout
 import java.util.concurrent.Executors
-import javax.swing.JButton
 import javax.swing.JPanel
 
 class CodeGraphPanel(private val project: Project) {
@@ -116,10 +115,12 @@ class CodeGraphPanel(private val project: Project) {
 
     private fun html() = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><style>
-*{box-sizing:border-box}
-body{margin:0;background:#1a1b26;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden}
-#cy{position:absolute;inset:0;top:52px;bottom:32px}
-#topbar{position:fixed;top:0;left:0;right:0;height:52px;background:#16161e;border-bottom:1px solid #2a2b3d;display:flex;align-items:center;gap:8px;padding:0 12px;z-index:10}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;background:#1a1b26;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+body{display:flex;flex-direction:column}
+#topbar{flex-shrink:0;height:52px;background:#16161e;border-bottom:1px solid #2a2b3d;display:flex;align-items:center;gap:8px;padding:0 12px}
+#cy{flex:1;min-height:0}
+#statusbar{flex-shrink:0;height:32px;background:#16161e;border-top:1px solid #2a2b3d;display:flex;align-items:center;padding:0 12px;gap:20px}
 #search{flex:1;max-width:260px;background:#1e1f2e;border:1px solid #2a2b3d;border-radius:8px;padding:7px 12px;color:#c0caf5;font-size:13px;outline:none}
 #search:focus{border-color:#7aa2f7}
 #search::placeholder{color:#565f89}
@@ -127,7 +128,6 @@ body{margin:0;background:#1a1b26;font-family:-apple-system,BlinkMacSystemFont,'S
 .btn:hover{background:#292b3e;border-color:#7aa2f7;color:#7aa2f7}
 .btn.active{background:#1d3054;border-color:#7aa2f7;color:#7aa2f7}
 .sep{width:1px;height:28px;background:#2a2b3d;margin:0 2px}
-#statusbar{position:fixed;bottom:0;left:0;right:0;height:32px;background:#16161e;border-top:1px solid #2a2b3d;display:flex;align-items:center;padding:0 12px;gap:20px;z-index:10}
 #stats{color:#565f89;font-size:11px}
 #selected-info{color:#7aa2f7;font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .legend{display:flex;align-items:center;gap:5px;color:#565f89;font-size:11px}
