@@ -53,6 +53,24 @@ Kotlin IntelliJ plugin (`src/main/kotlin/com/hackdelft/codegraph/`) with a Cytos
 - AI `focusEdges` are parsed but unused; step animations derive edges from `focusNodes`.
 - Cold-start race: editor "Explain" on a never-opened tool window can fire before the web page finishes loading.
 
+### Planned `clean_up` direction
+
+This branch should reduce graph size and UI lag by changing the main repository map from method-level nodes to file-level nodes.
+
+- **File nodes instead of method nodes:** Each graph node should represent a source file, not an individual function/method. This keeps large projects readable and avoids creating thousands of nodes.
+- **Aggregated file-to-file edges:** If methods in file A call methods in file B, create a single edge from file A to file B. Do not create more than one edge for the same ordered pair of files.
+- **Method list on each connection:** Each file-to-file edge should store a list of method-level calls that caused that connection. For example, an edge can contain `callerMethod`, `targetMethod`, and source location metadata for each call.
+- **Directed graph:** If calls only go from file A to file B, show the edge as directed A -> B. If calls exist in both directions, support either two directed edges or a clear bidirectional representation, but still avoid duplicate edges for the same direction.
+- **Folder-aware layout:** Files in the same folder/package should be visually grouped or placed near each other when possible. This can be done through layout hints, group labels, parent clusters, or another lightweight visual treatment.
+- **Known Java caveat:** Object creation and constructor-heavy patterns may connect one file to many others in Java codebases, especially when dependency setup happens in a central class. Do not solve this immediately, but keep the edge metadata rich enough that this can be filtered or weighted later.
+- **AI remains method-based:** The AI explanation flow should still operate on methods and focused method-level context, even though the main graph is file-level.
+- **Method selection entry points:** Users should be able to trigger method explanations in two ways:
+  - Right-click a method in the code editor and choose "Explain with CodeMap".
+  - Open a file-to-file edge's method-call list and choose one of the methods shown there.
+- **Navigate to method code:** Double-clicking a method from an edge's method-call list should navigate to that method in the editor.
+- **Generated step details:** The AI response should include both the step summary shown in the list and a more thorough explanation for each step. Generate the thorough per-step response during the first AI call; do not make another AI request when the user clicks a step.
+- **Step click behavior:** Clicking a step should show the already-generated thorough explanation for that step and play only that step's predefined type animation. Step clicks should not regenerate AI content.
+
 ---
 
 ## Core Principle
@@ -96,6 +114,15 @@ All AI output must be validated against known graph node IDs and edge IDs before
 7. User can click individual steps to highlight/animate only that step.
 8. User can also choose “Show all steps” to see the full flow at once.
 
+For the `clean_up` target graph, the graph flow should become method selection from a file-level map:
+
+1. User clicks a file node or file-to-file edge.
+2. If an edge is selected, CodeMap shows the aggregated method-call list for that file-to-file connection.
+3. User chooses a method from that list, or double-clicks the method to navigate to its code.
+4. CodeMap extracts focused method-level explanation context around the selected method.
+5. AI returns a structured step-by-step explanation, including both short list text and longer per-step detail text.
+6. Clicking a step shows the already-generated detail text and plays only that step's predefined type animation.
+
 ### Flow 3: Explain from editor
 
 1. User right-clicks a function/file/class in the IntelliJ editor.
@@ -104,6 +131,7 @@ All AI output must be validated against known graph node IDs and edge IDs before
 4. The graph focuses on the selected code element.
 5. AI generates a step-by-step explanation for the focused subgraph.
 6. The user can interact with the graph and explanation steps.
+7. For method explanations, right-clicking the method in code should remain the fastest entry point.
 
 ---
 
@@ -306,6 +334,25 @@ Keep them stable and simple.
 }
 ```
 
+For the `clean_up` file-level graph target, each edge should represent one aggregated directed file-to-file connection and include the method calls that caused it:
+
+```json
+{
+  "id": "fileA->fileB:calls",
+  "source": "file node id",
+  "target": "file node id",
+  "relation": "calls",
+  "methodCalls": [
+    {
+      "callerMethod": "qualified caller method",
+      "targetMethod": "qualified target method",
+      "callerLine": "optional line number",
+      "targetLine": "optional line number"
+    }
+  ]
+}
+```
+
 ### CodeGraph
 
 ```json
@@ -325,6 +372,7 @@ Keep them stable and simple.
   "title": "Short title",
   "type": "configured step type string",
   "explanation": "Short developer-friendly explanation",
+  "detail": "Longer explanation shown when the user opens this step",
   "focusNodes": ["existing node ids only"],
   "focusEdges": ["existing edge ids only"]
 }
@@ -401,6 +449,7 @@ Each step must include:
 - title
 - type
 - explanation
+- detail
 - focusNodes
 - focusEdges
 
