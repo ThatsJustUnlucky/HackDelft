@@ -16,105 +16,107 @@ import javax.swing.JPanel
 
 class CodeGraphPanel(private val project: Project) {
 
-    val component: JPanel = JPanel(BorderLayout())
-    private val browser = JBCefBrowser()
-    private val extractor = GraphDataExtractor(project)
-    private val jsQuery = JBCefJSQuery.create(browser)
-    private val bg = Executors.newSingleThreadExecutor()
+  val component: JPanel = JPanel(BorderLayout())
+  private val browser = JBCefBrowser()
+  private val extractor = GraphDataExtractor(project)
+  private val jsQuery = JBCefJSQuery.create(browser)
+  private val bg = Executors.newSingleThreadExecutor()
 
-    companion object {
-        private val instances = mutableMapOf<Project, CodeGraphPanel>()
-        fun getInstance(project: Project) = instances[project]
+  companion object {
+    private val instances = mutableMapOf<Project, CodeGraphPanel>()
+    fun getInstance(project: Project) = instances[project]
+  }
+
+  init {
+    instances[project] = this
+
+    jsQuery.addHandler { nodeId ->
+      navigateTo(nodeId)
+      null
     }
 
-    init {
-        instances[project] = this
-
-        jsQuery.addHandler { nodeId ->
-            navigateTo(nodeId)
-            null
+    browser.jbCefClient.addLoadHandler(object : org.cef.handler.CefLoadHandlerAdapter() {
+      override fun onLoadEnd(b: org.cef.browser.CefBrowser?, frame: org.cef.browser.CefFrame?, code: Int) {
+        if (frame?.isMain == true) {
+          val bridge = "window.navigateToNode=function(id){${jsQuery.inject("id")}};"
+          browser.cefBrowser.executeJavaScript(bridge, "", 0)
+          refreshGraph()
         }
+      }
+    }, browser.cefBrowser)
 
-        browser.jbCefClient.addLoadHandler(object : org.cef.handler.CefLoadHandlerAdapter() {
-            override fun onLoadEnd(b: org.cef.browser.CefBrowser?, frame: org.cef.browser.CefFrame?, code: Int) {
-                if (frame?.isMain == true) {
-                    val bridge = "window.navigateToNode=function(id){${jsQuery.inject("id")}};"
-                    browser.cefBrowser.executeJavaScript(bridge, "", 0)
-                    refreshGraph()
-                }
-            }
-        }, browser.cefBrowser)
+    browser.loadHTML(html())
+    component.add(browser.component, BorderLayout.CENTER)
+  }
 
-        browser.loadHTML(html())
-        component.add(browser.component, BorderLayout.CENTER)
+  fun focusNode(nodeId: String) {
+    val escaped = nodeId.e()
+    browser.cefBrowser.executeJavaScript("focusNode(\"$escaped\");", "", 0)
+  }
+
+  fun refreshGraph() {
+    bg.submit {
+      try {
+        val data = extractor.extract()
+        val json = toJson(data)
+        browser.cefBrowser.executeJavaScript("updateGraph($json);", "", 0)
+      } catch (_: Exception) {}
     }
+  }
 
-    fun focusNode(nodeId: String) {
-        val escaped = nodeId.e()
-        browser.cefBrowser.executeJavaScript("focusNode(\"$escaped\");", "", 0)
-    }
-
-    fun refreshGraph() {
-        bg.submit {
-            try {
-                val data = extractor.extract()
-                val json = toJson(data)
-                browser.cefBrowser.executeJavaScript("updateGraph($json);", "", 0)
-            } catch (_: Exception) {}
+  private fun navigateTo(nodeId: String) {
+    bg.submit {
+      when {
+        nodeId.startsWith("file:") -> {
+          val vf = LocalFileSystem.getInstance().findFileByPath(nodeId.removePrefix("file:")) ?: return@submit
+          ApplicationManager.getApplication().invokeLater {
+            FileEditorManager.getInstance(project).openFile(vf, true)
+          }
         }
-    }
-
-    private fun navigateTo(nodeId: String) {
-        bg.submit {
-            when {
-                nodeId.startsWith("file:") -> {
-                    val vf = LocalFileSystem.getInstance().findFileByPath(nodeId.removePrefix("file:")) ?: return@submit
-                    ApplicationManager.getApplication().invokeLater {
-                        FileEditorManager.getInstance(project).openFile(vf, true)
-                    }
-                }
-                else -> {
-                    val nav = ReadAction.compute<Navigatable?, Exception> { resolve(nodeId) } ?: return@submit
-                    ApplicationManager.getApplication().invokeLater { nav.navigate(true) }
-                }
-            }
+        else -> {
+          val nav = ReadAction.compute<Navigatable?, Exception> { resolve(nodeId) } ?: return@submit
+          ApplicationManager.getApplication().invokeLater { nav.navigate(true) }
         }
+      }
     }
+  }
 
-    private fun resolve(nodeId: String): Navigatable? {
-        val facade = JavaPsiFacade.getInstance(project)
-        val scope = GlobalSearchScope.projectScope(project)
-        return when {
-            nodeId.startsWith("class:") ->
-                facade.findClass(nodeId.removePrefix("class:"), scope) as? Navigatable
+  private fun resolve(nodeId: String): Navigatable? {
+    val facade = JavaPsiFacade.getInstance(project)
+    val scope = GlobalSearchScope.projectScope(project)
+    return when {
+      nodeId.startsWith("class:") ->
+        facade.findClass(nodeId.removePrefix("class:"), scope) as? Navigatable
 
-            nodeId.startsWith("method:") -> {
-                val rest = nodeId.removePrefix("method:")
-                val dot = rest.lastIndexOf('.')
-                if (dot < 0) return null
-                val cls = facade.findClass(rest.substring(0, dot), scope) ?: return null
-                cls.findMethodsByName(rest.substring(dot + 1), false).firstOrNull() as? Navigatable
-            }
+      nodeId.startsWith("method:") -> {
+        val rest = nodeId.removePrefix("method:")
+        val dot = rest.lastIndexOf('.')
+        if (dot < 0) return null
+        val cls = facade.findClass(rest.substring(0, dot), scope) ?: return null
+        cls.findMethodsByName(rest.substring(dot + 1), false).firstOrNull() as? Navigatable
+      }
 
-            else -> null
-        }
+      else -> null
     }
+  }
 
-    private fun toJson(data: GraphData): String {
-        val nodes = data.nodes.joinToString(",") { n ->
-            """{"data":{"id":"${n.id.e()}","label":"${n.label.e()}","type":"${n.type}","fp":"${n.filePath.e()}"}}"""
-        }
-        val edges = data.edges.mapIndexed { i, e ->
-            """{"data":{"id":"e$i","source":"${e.source.e()}","target":"${e.target.e()}","type":"${e.type}"}}"""
-        }.joinToString(",")
-        return """{"nodes":[$nodes],"edges":[$edges]}"""
+  private fun toJson(data: GraphData): String {
+    val nodes = data.nodes.joinToString(",") { n ->
+      """{"data":{"id":"${n.id.e()}","label":"${n.label.e()}","type":"${n.type}","fp":"${n.filePath.e()}","color":"${n.color}"}}"""
     }
+    val edges = data.edges.mapIndexed { i, e ->
+      """{"data":{"id":"e$i","source":"${e.source.e()}","target":"${e.target.e()}","type":"${e.type}","color":"${e.color}"}}"""
+    }.joinToString(",")
+    return """{"nodes":[$nodes],"edges":[$edges]}"""
+  }
 
-    private fun String.e() = replace("\\", "\\\\").replace("\"", "\\\"")
-        .replace("\n", "\\n").replace("\r", "")
+  private fun String.e() = replace("\\", "\\\\").replace("\"", "\\\"")
+    .replace("\n", "\\n").replace("\r", "")
 
-    private fun html() = """<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><style>
+  private fun html() = """<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.26.0/cytoscape.min.js"></script>
+<style>
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{width:100%;height:100%;overflow:hidden;background:#1a1b26;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
 body{display:flex;flex-direction:column}
@@ -152,70 +154,77 @@ body{display:flex;flex-direction:column}
   <div class="legend"><div class="dot" style="background:#bb9af7; border-radius:4px"></div>Abstract</div>
   <div class="legend"><div class="dot" style="background:#7aa2f7; border-radius:4px"></div>Interface</div>
   <div class="legend"><div class="dot" style="background:#9ece6a"></div>Method</div>
-  <div class="legend"><div class="dash" style="background:#f7768e"></div>Calls</div>
+  <div class="legend"><div class="dash" style="background:#c0caf5"></div>Inherits</div>
   <div class="sep"></div>
   <div id="stats">Loading...</div>
   <div id="selected-info"></div>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
 <script>
+// FIX 2: State variables moved to the top so they aren't 'undefined' when Search resets
+var hidden = {};
+var hiddenNodes = {};
+
 var cy=cytoscape({
   container:document.getElementById('cy'),
   style:[
-    // Standard Class (Rectangle)
     {selector:'node[type="class"]',style:{
-      'background-color':'#2d1f0e','border-color':'#ff9e64','border-width':3,
+      'background-color':'#2d1f0e','border-color':'data(color)','border-width':3,
       'label':'data(label)','color':'#c0caf5','font-size':'14px','font-weight':'bold',
       'text-valign':'center','text-halign':'center',
-      'shape':'round-rectangle',
-      'width':120,'height':45,
-      'text-wrap':'ellipsis','text-max-width':'100px',
-      'z-index': 100
+      'shape':'round-rectangle', 'width':120,'height':45,
+      'text-wrap':'ellipsis','text-max-width':'100px', 'z-index': 100
     }},
-    // Abstract Class (Purple Square)
     {selector:'node[type="abstract"]',style:{
-      'background-color':'#2a1a3a','border-color':'#bb9af7','border-width':3,
+      'background-color':'#2a1a3a','border-color':'data(color)','border-width':3,
       'label':'data(label)','color':'#c0caf5','font-size':'13px','font-weight':'bold',
       'text-valign':'center','text-halign':'center',
-      'shape':'round-rectangle',
-      'width':80,'height':80,
-      'text-wrap':'ellipsis','text-max-width':'70px',
-      'z-index': 100
+      'shape':'round-rectangle', 'width':80,'height':80,
+      'text-wrap':'ellipsis','text-max-width':'70px', 'z-index': 100
     }},
-    // Interface (Blue Square)
     {selector:'node[type="interface"]',style:{
-      'background-color':'#1a2035','border-color':'#7aa2f7','border-width':3,
+      'background-color':'#1a2035','border-color':'data(color)','border-width':3,
       'label':'data(label)','color':'#c0caf5','font-size':'13px','font-weight':'bold',
       'text-valign':'center','text-halign':'center',
-      'shape':'round-rectangle',
-      'width':80,'height':80,
-      'text-wrap':'ellipsis','text-max-width':'70px',
-      'z-index': 100
+      'shape':'round-rectangle', 'width':80,'height':80,
+      'text-wrap':'ellipsis','text-max-width':'70px', 'z-index': 100
     }},
-    // Method (Stays an Ellipse/Circle)
     {selector:'node[type="method"]',style:{
-      'background-color':'#1a2e10','border-color':'#9ece6a','border-width':2,
+      'background-color':'#1a2e10','border-color':'data(color)','border-width':2,
       'label':'data(label)','color':'#c0caf5','font-size':'11px',
       'text-valign':'center','text-halign':'center',
       'width':65,'height':65,'shape':'ellipse',
       'text-wrap':'ellipsis','text-max-width':'55px'
     }},
-    // Edges
+    {selector:'node[type="abstract_method"]',style:{
+      'background-color':'#2a1a3a','border-color':'data(color)','border-width':2,
+      'border-style':'dashed',
+      'label':'data(label)','color':'#bb9af7','font-size':'11px','font-style':'italic',
+      'text-valign':'center','text-halign':'center',
+      'width':65,'height':65,'shape':'ellipse',
+      'text-wrap':'ellipsis','text-max-width':'55px'
+    }},
     {selector:'edge[type="contains"]',style:{
-      'line-color':'#2a2b3d','target-arrow-color':'#2a2b3d','target-arrow-shape':'chevron',
-      'curve-style':'bezier','width':1.5,'opacity':0.7,'arrow-scale':0.8
+      'line-color':'data(color)','target-arrow-color':'data(color)',
+      'target-arrow-shape':'chevron', 'curve-style':'bezier',
+      'width':1.5,'opacity':0.7,'arrow-scale':0.8
     }},
     {selector:'edge[type="calls"]',style:{
-      'line-color':'#f7768e','target-arrow-color':'#f7768e','target-arrow-shape':'triangle',
-      'curve-style':'unbundled-bezier','width':2,'line-style':'dashed','opacity':0.85,
+      'line-color':'data(color)','target-arrow-color':'data(color)',
+      'target-arrow-shape':'triangle', 'curve-style':'unbundled-bezier',
+      'width':2,'line-style':'dashed','opacity':0.85,
       'arrow-scale':0.9,'control-point-step-size':40
     }},
-    // States
-    {selector:'node:selected',style:{'border-width':3,'border-color':'#e0af68','shadow-blur':15,'shadow-color':'#e0af68','shadow-opacity':0.8}},
+    {selector:'edge[type="inherits"]',style:{
+      'line-color':'#c0caf5','target-arrow-color':'#c0caf5',
+      'target-arrow-shape':'triangle-backcurve', 'target-arrow-fill':'hollow',
+      'curve-style':'bezier','width':2,'opacity':1.0,
+      'arrow-scale':1.5
+    }},
+    {selector:'node:selected',style:{'border-width':3,'border-color':'#ffffff','shadow-blur':15,'shadow-color':'#ffffff','shadow-opacity':0.8}},
     {selector:'.dim',style:{opacity:0.07}},
-    {selector:'.highlight',style:{'border-color':'#e0af68','border-width':3}},
-    {selector:'.search-match',style:{'border-color':'#e0af68','border-width':3}}
+    {selector:'.highlight',style:{'border-color':'#ffffff','border-width':3}},
+    {selector:'.search-match',style:{'border-color':'#ffffff','border-width':3}}
   ],
   layout:{name:'cose'}
 });
@@ -229,30 +238,19 @@ function layout(){
     name: 'cose',
     animate: true,
     animationDuration: 600,
-
-    // 1. The Overlap Forcefield
     nodeOverlap: 8000,
     nodeDimensionsIncludeLabels: true,
-
-    // 2. Extend the Orbits (Compensates for the 120px wide rectangles)
     idealEdgeLength: 250,
-
-    // 3. Keep the simulation "hot" so it has time to push everything apart
     numIter: 4000,
     initialTemp: 500,
     coolingFactor: 0.99,
     gravity: 0.05,
-
-    // 4. Massive Repulsion
     nodeRepulsion: function(node) {
       var t = node.data('type');
       if (t === 'class' || t === 'abstract' || t === 'interface') return 4000000;
       return 800000;
     },
-
-    // Allow the methods to slide around the class to find open space
     edgeElasticity: 0.1
-
   }).run();
 }
 
@@ -278,12 +276,10 @@ function focusNode(id){
 }
 
 function searchNodes(q){
-  // 1. Clean up previous search states
   cy.elements().removeClass('search-match dim');
   cy.elements().show();
 
   if(!q) {
-    // If search is cleared, restore any toggle button states and fit
     restoreHiddenStates();
     cy.fit(null, 40);
     return;
@@ -291,47 +287,35 @@ function searchNodes(q){
 
   q = q.toLowerCase();
 
-  // 2. Find exact or partial text matches
   var matches = cy.nodes().filter(function(n){
     return n.data('label').toLowerCase().indexOf(q) >= 0;
   });
 
   if(matches.length === 0) {
-    cy.elements().hide(); // Hide everything if no match
+    cy.elements().hide();
     return;
   }
 
-  // 3. Start a collection of elements we want to keep visible
   var toShow = cy.collection().union(matches);
-
-  // 4. Add the 1st-degree neighborhood (callers, callees, and immediate parent/children)
   var neighbors = matches.closedNeighborhood();
   toShow = toShow.union(neighbors);
 
-  // 5. CRUCIAL: If a dependent method was pulled in, we MUST find its parent class
-  // Otherwise, you'd just see a floating method without knowing what class it belongs to.
-  var methodsInView = toShow.filter('node[type="method"]');
+  // FIX 3: Added 'abstract_method' so they don't lose their parent classes!
+  var methodsInView = toShow.filter('node[type="method"], node[type="abstract_method"]');
   var parentEdges = cy.edges('[type="contains"]').filter(function(e){
     return methodsInView.contains(e.target());
   });
 
-  // Add those parent classes and the edges connecting them
   toShow = toShow.union(parentEdges).union(parentEdges.sources());
-
-  // 6. Hide everything that isn't in our 'toShow' collection
   cy.elements().not(toShow).hide();
-
-  // 7. Highlight the actual nodes that matched the text
   matches.addClass('search-match');
 
-  // 8. Smoothly zoom and pan to the newly filtered cluster
   cy.animate({
     fit: { eles: toShow, padding: 40 },
     duration: 350
   });
 }
 
-// Helper to ensure clicking "Reset" or clearing search respects your Hide/Show buttons
 function restoreHiddenStates() {
   if (hidden['contains']) cy.$('edge[type="contains"]').hide();
   if (hidden['calls']) cy.$('edge[type="calls"]').hide();
@@ -350,7 +334,6 @@ function resetView(){
   cy.fit(null,40);
 }
 
-var hidden={};
 function togBtn(type,btnId){
   var sel='edge[type="'+type+'"]';
   var btn=document.getElementById(btnId);
@@ -365,7 +348,6 @@ function togBtn(type,btnId){
   }
 }
 
-var hiddenNodes = {};
 function toggleNodes(nodeType, btnId) {
   var sel = 'node[type="' + nodeType + '"]';
   var btn = document.getElementById(btnId);
