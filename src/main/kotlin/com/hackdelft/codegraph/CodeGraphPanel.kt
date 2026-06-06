@@ -171,11 +171,12 @@ var cy=cytoscape({
       'padding':'8px'
     }},
     {selector:'node[type="class"]',style:{
-      'background-color':'#2d1f0e','border-color':'#ff9e64','border-width':2,
-      'label':'data(label)','color':'#c0caf5','font-size':'11px','font-weight':'bold',
+      'background-color':'#2d1f0e','border-color':'#ff9e64','border-width':3,
+      'label':'data(label)','color':'#c0caf5','font-size':'13px','font-weight':'bold',
       'text-valign':'center','text-halign':'center',
-      'width':80,'height':80,'shape':'ellipse',
-      'text-wrap':'ellipsis','text-max-width':'72px'
+      'width':90,'height':90,'shape':'ellipse',
+      'text-wrap':'ellipsis','text-max-width':'80px',
+      'z-index': 100
     }},
     {selector:'node[type="method"]',style:{
       'background-color':'#1a2e10','border-color':'#9ece6a','border-width':2,
@@ -202,11 +203,37 @@ var cy=cytoscape({
 });
 
 function layout(){
-  cy.layout({
-    name:'cose',animate:true,animationDuration:600,
-    nodeRepulsion:80000,gravity:0.05,
-    idealEdgeLength:120,edgeElasticity:0.3,
-    numIter:2000,initialTemp:200,coolingFactor:0.97,minTemp:1.0
+  // 1. Filter out the 'calls' edges so they don't apply physics forces
+  var structuralElements = cy.elements().filter(function(ele) {
+    return ele.isNode() || ele.data('type') === 'contains';
+  });
+
+  // 2. Run the layout ONLY on the structure
+  structuralElements.layout({
+    name: 'cose',
+    animate: true,
+    animationDuration: 600,
+
+    // Strict overlap prevention
+    nodeOverlap: 60,
+    nodeDimensionsIncludeLabels: true,
+
+    // Physics parameters
+    numIter: 3000,
+    initialTemp: 400,
+    coolingFactor: 0.98,
+    gravity: 0.05,
+
+    // Massive repulsion to keep the orbits clean
+    nodeRepulsion: function(node) {
+      if (node.data('type') === 'class' || node.data('type') === 'file') return 2000000;
+      return 600000;
+    },
+
+    // Since we filtered out 'calls', we only deal with 'contains' edges here
+    idealEdgeLength: 120,
+    edgeElasticity: 0.2
+
   }).run();
 }
 
@@ -260,6 +287,24 @@ function togBtn(type,btnId){
   }else{
     cy.$(sel).hide();hidden[type]=true;
     btn.textContent='Show '+(type==='contains'?'Structure':'Calls');
+    btn.classList.add('active');
+  }
+}
+
+var hiddenNodes = {};
+function toggleNodes(nodeType, btnId) {
+  var sel = 'node[type="' + nodeType + '"]';
+  var btn = document.getElementById(btnId);
+
+  if (hiddenNodes[nodeType]) {
+    cy.$(sel).show();
+    hiddenNodes[nodeType] = false;
+    btn.textContent = 'Hide ' + nodeType.charAt(0).toUpperCase() + nodeType.slice(1) + 's';
+    btn.classList.remove('active');
+  } else {
+    cy.$(sel).hide();
+    hiddenNodes[nodeType] = true;
+    btn.textContent = 'Show ' + nodeType.charAt(0).toUpperCase() + nodeType.slice(1) + 's';
     btn.classList.add('active');
   }
 }
