@@ -321,6 +321,15 @@ g.node,path.vis{transition:opacity .16s ease}
 .mp-method:hover{color:#7aa2f7}
 .mp-actions{display:flex;gap:6px}
 .mp-actions .btn{flex:1;padding:5px 8px;font-size:11px}
+.mp-group{margin-bottom:12px}
+.mp-group-h{color:#7aa2f7;font-size:12px;font-weight:600;margin-bottom:6px;display:flex;align-items:center;gap:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mp-count{color:#565f89;font-size:10px;font-weight:500;background:#1e1f2e;border:1px solid #2a2b3d;border-radius:8px;padding:1px 6px;flex-shrink:0}
+.mp-chips{display:flex;flex-wrap:wrap;gap:5px}
+.mp-chip{display:inline-flex;align-items:center;gap:4px;background:#1e1f2e;border:1px solid #2a2b3d;border-radius:7px;padding:4px 7px;font-size:10px;max-width:100%}
+.mp-chip.defined{border-color:#9ece6a;background:#1a2420}
+.mp-chip .mp-cm{color:#c0caf5;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px}
+.mp-chip .mp-cm:hover{color:#7aa2f7}
+.mp-chip .mp-arrow{color:#565f89;flex-shrink:0}
 </style></head><body>
 
 <div id="topbar">
@@ -590,11 +599,11 @@ function resetCircleStrokes(){
 
 function nodeClick(d){
   selectedId=d.id; hoverLock=true; stepMode=false;
-  closeMethodPanel();
   hoverNode(d);
   resetCircleStrokes();
   nodeSel.filter(function(n){return n.id===d.id;}).select('circle').attr('stroke','#fff').attr('stroke-width',3);
   document.getElementById('selected-info').textContent='▶ '+d.label+(d.isTest?' (test)':'');
+  openNodePanel(d);
   if(window.navigateToNode) window.navigateToNode(d.id);
 }
 
@@ -696,6 +705,7 @@ function openMethodPanel(d){
   currentMethodCalls=d.methodCalls||[];
   document.getElementById('steppanel').classList.add('hidden');
   document.getElementById('methodpanel').classList.remove('hidden');
+  document.getElementById('mp-title').textContent='File Calls';
   document.getElementById('mp-summary').textContent=label(d.source.id)+' → '+label(d.target.id)+' · '+currentMethodCalls.length+' method calls';
   var html='';
   currentMethodCalls.forEach(function(c){
@@ -711,6 +721,62 @@ function openMethodPanel(d){
   document.getElementById('mp-methods').innerHTML=html||'<div class="sp-step-e">No method calls recorded.</div>';
 }
 function closeMethodPanel(){document.getElementById('methodpanel').classList.add('hidden');}
+
+// ---- node panel (file node -> every method call, grouped by the other file) ----
+// Clicking a method on a chip reveals its connection in the graph and opens the method in the editor (no AI).
+function revealMethod(navId,cm,tm){
+  var link=null;
+  for(var i=0;i<rawLinks.length&&!link;i++){
+    var l=rawLinks[i]; if(l.type!=='calls') continue;
+    var calls=l.methodCalls||[];
+    for(var j=0;j<calls.length;j++){if(calls[j].callerMethod===cm&&calls[j].targetMethod===tm){link=l;break;}}
+  }
+  if(link){
+    edgeClick(link);
+    var pts=[link.source,link.target].filter(function(n){return n&&n.x!=null;});
+    if(pts.length) fitTo(pts,120);
+  }
+  if(window.navigateToNode) window.navigateToNode(navId);
+}
+function nodeChip(c,defined){
+  var cm=escapeAttr(c.callerMethod||''), tm=escapeAttr(c.targetMethod||'');
+  return '<span class="mp-chip'+(defined?' defined':'')+'" title="'+cm+' → '+tm+'">'
+    +'<span class="mp-cm" onclick="revealMethod(\''+cm+'\',\''+cm+'\',\''+tm+'\')">'+escapeHtml(methodLabel(c.callerMethod))+'</span>'
+    +'<span class="mp-arrow">→</span>'
+    +'<span class="mp-cm" onclick="revealMethod(\''+tm+'\',\''+cm+'\',\''+tm+'\')">'+escapeHtml(methodLabel(c.targetMethod))+'</span>'
+    +'</span>';
+}
+function openNodePanel(d){
+  document.getElementById('steppanel').classList.add('hidden');
+  document.getElementById('methodpanel').classList.remove('hidden');
+  document.getElementById('mp-title').textContent=d.label;
+  var groups={};
+  rawLinks.forEach(function(l){
+    if(l.type!=='calls') return;
+    if(l.si!==d.id&&l.ti!==d.id) return;
+    var other=(l.si===d.id)?l.ti:l.si, outgoing=(l.si===d.id);
+    var g=groups[other]||(groups[other]={out:[],inc:[]});
+    (l.methodCalls||[]).forEach(function(c){(outgoing?g.out:g.inc).push(c);});
+  });
+  var arr=Object.keys(groups).map(function(id){var g=groups[id];return {id:id,out:g.out,inc:g.inc,n:g.out.length+g.inc.length};});
+  if(!arr.length){
+    document.getElementById('mp-summary').textContent=d.label+' · no method calls';
+    document.getElementById('mp-methods').innerHTML='<div class="sp-step-e">This file has no recorded method-call connections.</div>';
+    return;
+  }
+  arr.sort(function(a,b){return b.n-a.n;});
+  var total=arr.reduce(function(s,g){return s+g.n;},0);
+  document.getElementById('mp-summary').textContent=d.label+' · '+arr.length+' files · '+total+' calls';
+  var html='';
+  arr.forEach(function(g){
+    html+='<div class="mp-group"><div class="mp-group-h" title="'+escapeAttr(label(g.id))+'">'+escapeHtml(label(g.id))+' <span class="mp-count">'+g.n+'</span></div><div class="mp-chips">';
+    // Group file's methods first: outgoing (clicked file -> group file) calls target a method defined in the group file.
+    g.out.forEach(function(c){html+=nodeChip(c,true);});
+    g.inc.forEach(function(c){html+=nodeChip(c,false);});
+    html+='</div></div>';
+  });
+  document.getElementById('mp-methods').innerHTML=html;
+}
 
 // ---- AI explain: steps + method overlay ----
 function openPanelLoading(){
