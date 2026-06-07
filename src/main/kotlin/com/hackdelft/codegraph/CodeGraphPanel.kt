@@ -340,6 +340,8 @@ g.node,path.vis{transition:opacity .16s ease}
   <button class="btn" id="btn-inherits" onclick="toggleEdgeType('inherits','btn-inherits')">Inherits</button>
   <button class="btn" id="btn-tests" onclick="toggleEdgeType('tests','btn-tests')">Tests</button>
   <div class="sep"></div>
+  <button class="btn" id="btn-hidetests" onclick="toggleTestFiles('btn-hidetests')" title="Make all test files invisible">Hide Tests</button>
+  <div class="sep"></div>
   <button class="btn" onclick="resetView()">Reset</button>
   <button class="btn" onclick="window.codemapRefresh&&window.codemapRefresh()">Refresh</button>
 </div>
@@ -395,6 +397,7 @@ var selectedId = null, hoverLock = false, stepMode = false;
 var currentSteps = [], currentMethodCalls = [];
 var overlayMethods = [], overlayCalls = [];
 var hiddenTypes = {calls:false, inherits:false, tests:false};
+var hideTests = false;
 var fx = {repel:1.2, linkDist:1.3, cluster:0.06};
 
 var EDGE_STYLE = {
@@ -537,6 +540,7 @@ function draw(){
     .attr('stroke-dasharray',function(d){return d.isTest?'3,2':'';});
   nodeSel.select('text').text(function(d){return d.label;}).attr('dy',function(d){return radius(d)+12;});
   updateLabels();
+  applyTestVisibility();
 }
 
 function ticked(){
@@ -661,6 +665,16 @@ function toggleEdgeType(type,btnId){
     linkSel.select('path.vis').style('opacity',function(l){return hiddenTypes[l.type]?0:edgeOpacity(l);});
     linkSel.select('path.hit').style('pointer-events',function(l){return hiddenTypes[l.type]?'none':'stroke';});
   }
+}
+// Hide/show all test file nodes (and any edge touching one). Persists across redraws and other view states.
+function applyTestVisibility(){
+  if(nodeSel) nodeSel.style('display',function(d){return (hideTests&&d.isTest)?'none':null;});
+  if(linkSel) linkSel.style('display',function(l){return (hideTests&&(l.source.isTest||l.target.isTest))?'none':null;});
+}
+function toggleTestFiles(btnId){
+  hideTests=!hideTests;
+  var b=document.getElementById(btnId); if(b)b.classList.toggle('active',hideTests);
+  applyTestVisibility();
 }
 function searchNodes(q){
   if(!nodeSel) return;
