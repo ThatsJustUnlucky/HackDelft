@@ -2,6 +2,7 @@ package com.hackdelft.codegraph
 
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.psi.PsiMethod
@@ -27,6 +28,8 @@ class OpenInGraphViewAction : AnAction("Open in Codesidian") {
     override fun update(e: AnActionEvent) {
         e.presentation.isEnabledAndVisible = methodIdAtCaret(e) != null || targetFilePath(e) != null
     }
+
+    override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
 
     // The file under the editor caret, or the file selected in the Project view; null for directories.
     private fun targetFilePath(e: AnActionEvent): String? {

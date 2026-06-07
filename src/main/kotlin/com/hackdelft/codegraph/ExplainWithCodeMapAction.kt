@@ -2,6 +2,7 @@ package com.hackdelft.codegraph
 
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.psi.PsiMethod
@@ -20,6 +21,8 @@ class ExplainWithCodeMapAction : AnAction("Explain with Codesidian") {
   override fun update(e: AnActionEvent) {
     e.presentation.isEnabledAndVisible = targetNodeId(e) != null
   }
+
+  override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
 
   private fun targetNodeId(e: AnActionEvent): String? {
     val editor = e.getData(CommonDataKeys.EDITOR) ?: return null
