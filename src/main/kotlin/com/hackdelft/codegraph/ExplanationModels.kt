@@ -1,6 +1,6 @@
 package com.hackdelft.codegraph
 
-// AI explanation contract (see context/CODEMAP_CONTEXT.md → Data Contracts).
+// AI explanation contract (see context/CODESIDIAN_CONTEXT.md → Data Contracts).
 // AI never invents structure: focusNodes/focusEdges are validated against the real graph.
 
 data class AIExplanationStep(

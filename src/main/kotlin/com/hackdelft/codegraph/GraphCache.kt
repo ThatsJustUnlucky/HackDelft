@@ -4,11 +4,11 @@ import com.google.gson.JsonParser
 import com.intellij.openapi.project.Project
 import java.io.File
 
-// Layer 1 cache: persist the deterministic repo graph to .codemap/cache.json so large
+// Layer 1 cache: persist the deterministic repo graph to .codesidian/cache.json so large
 // repos don't re-extract on every open. Simple invalidation: refresh button forces re-extract.
 class GraphCache(project: Project) {
 
-  private val file: File? = project.basePath?.let { File(it, ".codemap/cache.json") }
+  private val file: File? = project.basePath?.let { File(it, ".codesidian/cache.json") }
 
   fun load(): GraphData? {
     val f = file ?: return null

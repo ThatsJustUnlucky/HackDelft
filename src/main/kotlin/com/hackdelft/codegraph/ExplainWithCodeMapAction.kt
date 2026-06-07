@@ -7,13 +7,13 @@ import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.util.PsiTreeUtil
 
-// Flow 3: right-click a method in the editor, open Code Graph, and run AI focus mode.
-class ExplainWithCodeMapAction : AnAction("Explain with CodeMap") {
+// Flow 3: right-click a method in the editor, open Codesidian, and run AI focus mode.
+class ExplainWithCodeMapAction : AnAction("Explain with Codesidian") {
 
   override fun actionPerformed(e: AnActionEvent) {
     val project = e.project ?: return
     val nodeId = targetNodeId(e) ?: return
-    val tw = ToolWindowManager.getInstance(project).getToolWindow("Code Graph") ?: return
+    val tw = ToolWindowManager.getInstance(project).getToolWindow("Codesidian") ?: return
     tw.show { CodeGraphPanel.getInstance(project)?.explainNode(nodeId) }
   }
 

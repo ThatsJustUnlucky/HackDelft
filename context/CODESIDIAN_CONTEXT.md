@@ -1,6 +1,6 @@
-# CodeMap Product Context
+﻿# Codesidian Product Context
 
-This document is context only. It describes the product vision, MVP scope, architecture, and data contracts for CodeMap.
+This document is context only. It describes the product vision, MVP scope, architecture, and data contracts for Codesidian.
 
 It does **not** replace `CLAUDE.md`, `AGENTS.md`, or any other agent behavior instructions. If there is a conflict, the repo-level agent instructions take priority.
 
@@ -10,11 +10,11 @@ Agents should use this file to understand what we are building before planning o
 
 ## Project Summary
 
-CodeMap is an IntelliJ IDE plugin for a 24-hour hackathon.
+Codesidian is an IntelliJ IDE plugin for a 24-hour hackathon.
 
 The goal is to help developers understand large and unfamiliar codebases by turning the repository into an interactive visual map. The plugin should make it easier to onboard into a project, understand how files/functions interact, and make changes with more confidence.
 
-CodeMap combines:
+Codesidian combines:
 
 1. A deterministic repository graph generated from the actual codebase.
 2. A cached Obsidian-style visual map of the repo.
@@ -29,24 +29,24 @@ The core product idea is:
 
 ## Current Implementation Status
 
-Kotlin IntelliJ plugin (`src/main/kotlin/com/hackdelft/codegraph/`) with a D3-force SVG frontend (a single self-contained HTML/JS string in `CodeGraphPanel.html()`) embedded in a JCEF tool window. Build: Gradle 8.6, JDK 17 toolchain, IntelliJ 2023.2.5, `org.jetbrains.intellij` 1.17.4. Run with `./gradlew runIde` (the Gradle wrapper is committed). `runIde` reads `OPENAI_API_KEY` from the project `.env` and passes it as `-Dopenai.api.key` so the AI flow finds a key in the sandbox.
+Kotlin IntelliJ plugin (`src/main/kotlin/com/hackdelft/codegraph/`) with a D3-force SVG frontend (a single self-contained HTML/JS string in `CodeGraphPanel.html()`) embedded in a JCEF tool window. Build: Gradle 9.5.1, Kotlin 2.4.0, JDK 21 toolchain (auto-provisioned via the foojay resolver), IntelliJ IDEA Community 2025.2.1, `org.jetbrains.intellij.platform` 2.16.0 (`sinceBuild=252`, open `untilBuild`). Run with `./gradlew runIde` (the Gradle wrapper is committed). `runIde` reads `OPENAI_API_KEY` from the project `.env` and passes it as `-Dopenai.api.key` so the AI flow finds a key in the sandbox.
 
 ### Implemented
 
 - **Repo graph (Flow 1):** `GraphDataExtractor` uses PSI (`AllClassesSearch` + method-call resolution) to build a deterministic file-level graph. Nodes are source files. A directed `calls` edge connects file A to file B when a method in A calls a method in B. Calls for the same ordered file pair are aggregated into one edge with a `methodCalls` list. The extractor also emits directed `inherits` edges (extends/implements; library supertypes skipped) and `tests` edges (test file → tested class, matched by `XxxTest`→`Xxx` naming else the production file the test calls into most), and flags test files with `isTest`. Rendered by `CodeGraphPanel` as a **D3-force SVG** graph: continuous force simulation, node radius scaled by connection count, folder-based color clustering, drag-to-fling, hover-to-focus dimming, zoom-aware labels, a live force-tuning panel (Spread / Link length / Grouping sliders), per-type edge toggles (calls / inherits / tests), a **Hide Tests** button (**on by default**) that makes all test-file nodes (and their incident edges) invisible (`toggleTestFiles` / `applyTestVisibility`, persists across redraws; `fitAll` frames only the visible nodes while active), search, and click-to-open file.
 - **Search + controls polish:** The top bar has separate file and method searches. File search highlights matching file nodes and same-match connections. Method search searches `methodCalls`, highlights only the file where the matched caller/target method is defined, keeps matching file-to-file call edges visible, and frames the camera around both connected files without highlighting use-only files. Search camera state is restored when clearing/clicking out. The file/edge method-call panel also has an internal method search. `Forces`, `Calls`, `Inherits`, and `Tests` live under a compact `Controls` dropdown; `Hide Tests` remains a direct top-bar toggle.
-- **Local cache (Layer 1):** `GraphCache` reads/writes `.codemap/cache.json` (gitignored). `refreshGraph()` loads the cache or extracts; the "Refresh" button forces re-extract.
+- **Local cache (Layer 1):** `GraphCache` reads/writes `.codesidian/cache.json` (gitignored). `refreshGraph()` loads the cache or extracts; the "Refresh" button forces re-extract.
 - **Focused subgraph (Layer 2):** `FocusedSubgraphExtractor.extract(full, selectedId, selectedFilePath)` filters the file-level graph to ~24 files around a selected file or selected method. For method explanations, it keeps file-call edges whose `methodCalls` mention the selected method plus nearby file context. Deterministic; no AI.
 - **AI explanation (Layer 3):** `AIExplainService` builds a **per-call walkthrough** prompt (one step per method call the selected method makes; a step may also be a non-call/logic step) and calls OpenAI `gpt-5.5` (`reasoning_effort: high`, JSON mode, **240s request timeout**); the explanation pass leaves step types as `unknown`. A second lightweight pass (`gpt-5.4-nano`, 20s) assigns one allowed step type per step. The backend then runs `pinAnchorAndSingleFile`: step 1 is pinned to the selected method's home file (the **anchor**), and every other step is reduced to one file **plus a deterministically-assigned `focusMethod`** (matched from the selected method's calls by target file; same-file repeats allowed). focusNodes/types are validated against the real subgraph. Key from `OPENAI_API_KEY`, `-Dopenai.api.key`, or project `.env`; deterministic offline mock on no-key or any failure (e.g. timeout). Contracts in `ExplanationModels.kt` — `AIExplanationStep` also carries `detail` and `focusMethod`.
 - **Follow-up chat:** After an explanation is generated, the step panel includes a small chat box for follow-up questions. Chat uses `gpt-5.5` JSON mode with a **45s timeout** and explicit `reasoning_effort` default `medium`; the UI has a compact dropdown for `low` / `medium` / `high` / `xhigh` (Extra High). The chat prompt receives the selected node, the highlighted/focused graph, the generated explanation, relevant snippets, recent chat history, and the whole repo graph (with method-call lists capped per edge for prompt size). Highlighted explanation context should remain the main thread; whole-repo graph context is for broader repo questions. Offline fallback returns a deterministic context summary.
 - **Step panel + method overlay (Layer 4):** Side panel lists typed steps, each with a detailed explanation (shown on click; no extra AI call), plus the follow-up chat; the chat log expands slightly after an answer arrives. On explain, `setStepMethods` adds a **method overlay** — only the *used* methods (selected method + its cross-file callees) as small nodes clustered on their file node, linked by `memberof` (file→method) and `methodcall` (method→method) edges; `clearStepMethods` removes it when the panel closes. `playStep` / `showAllSteps` highlight **cumulatively on methods** (steps 0..i), keep each used method's file glowing as context, light only `methodcall` + `memberof` edges (**never file→file**), dim everything else, and pulse the current step's method. The auto-played step 0 is final (no extra neighbor re-lighting after `showExplanation`). Frontend owns all animation; colors come from `TYPE_COLORS`.
-- **Actions:** "Explain with CodeMap" (editor right-click on a method → `ExplainWithCodeMapAction` → `CodeGraphPanel.explainNode`) shows the loading panel immediately (`openPanelLoading`), then renders typed steps. "Open in Graph View" (`OpenInGraphViewAction`, enabled **only when the caret is on a method name or a call to one** → `openMethodInGraph` → JS `openMethodConnections`) reveals **only that one function's connections** — outgoing (methods it calls) + incoming (methods that call it), grouped by the other file and sorted by size, with the involved edges/files highlighted and zoomed. In the graph, **clicking a file node** opens the per-file method panel (`openNodePanel`): every call touching that file, grouped by the other file (groups sorted by size; within each group the group file's own/outgoing methods first, accented green), and opens the file in the editor. **Clicking a method chip** (`revealMethod`) reveals that file→file connection and opens the method in the editor — deterministic, no AI. **Clicking a file-to-file edge** opens its aggregated method-call list (its caller/target buttons still explain via AI). **Clicking the graph background or ✕** dismisses the step view and clears the method overlay. The grouped connection panels (file- and method-scoped) share `renderGroupPanel` / `groupArr`.
+- **Actions:** "Explain with Codesidian" (editor right-click on a method → `ExplainWithCodeMapAction` → `CodeGraphPanel.explainNode`) shows the loading panel immediately (`openPanelLoading`), then renders typed steps. "Open in Codesidian" (`OpenInGraphViewAction`) is available on the **editor right-click** (whenever a file is open) and the **Project view right-click** (any file); it maps the current code: if the caret is on a method name/call it reveals **that one function's connections** (→ `openMethodInGraph` → JS `openMethodConnections`) — outgoing + incoming, grouped by the other file and sorted by size, edges/files highlighted and zoomed; otherwise it reveals the **current file** (→ `openFileInGraph` → JS `openFileInGraph`) by highlighting the file node, its neighbors, and incident edges, opening its grouped method-call panel (`openNodePanel`), and framing the camera. In the graph, **clicking a file node** opens the per-file method panel (`openNodePanel`): every call touching that file, grouped by the other file (groups sorted by size; within each group the group file's own/outgoing methods first, accented green), and opens the file in the editor. **Clicking a method chip** (`revealMethod`) reveals that file→file connection and opens the method in the editor — deterministic, no AI. **Clicking a file-to-file edge** opens its aggregated method-call list (its caller/target buttons still explain via AI). **Clicking the graph background or ✕** dismisses the step view and clears the method overlay. The grouped connection panels (file- and method-scoped) share `renderGroupPanel` / `groupArr`.
 
 ### Key conventions
 
 - Node ids: main graph nodes use `file:<absolutePath>` and carry an `isTest` boolean. Method ids still use `method:<qualifiedName>.<name>` for explanation entry points and edge metadata. Main graph edge types are `calls`, `inherits`, and `tests`.
 - JS↔Kotlin bridge: one `JBCefJSQuery`; frontend posts `{t:'nav'|'explain'|'chat'|'refresh', id/q/effort}`, routed by `handleMessage`.
-- Renderer is vanilla **D3 v7** (no React, no Cytoscape), loaded from CDN inside `html()`. Kotlin drives it through a fixed JS API — `updateGraph(d)`, `openMethodConnections(methodId)`, `showExplanation(resp)`, `setStepMethods(data)` — keep these signatures stable; the Kotlin side calls them by name. The `html()` Kotlin raw string must avoid `$`-interpolation triggers (no JS template literals / `${...}`); build JS strings with `+` concatenation. UI chrome uses the **IntelliJ New UI dark palette** (canvas `#1e1f22`, panels/bars `#2b2d30`, borders `#393b40`, accent `#548af7`, muted text `#6f737a`); file-node fills stay folder-random.
+- Renderer is vanilla **D3 v7** (no React, no Cytoscape), loaded from CDN inside `html()`. Kotlin drives it through a fixed JS API — `updateGraph(d)`, `openMethodConnections(methodId)`, `openFileInGraph(fileId)`, `showExplanation(resp)`, `setStepMethods(data)` — keep these signatures stable; the Kotlin side calls them by name. The `html()` Kotlin raw string must avoid `$`-interpolation triggers (no JS template literals / `${...}`); build JS strings with `+` concatenation. UI chrome uses the **IntelliJ New UI dark palette** (canvas `#1e1f22`, panels/bars `#2b2d30`, borders `#393b40`, accent `#548af7`, muted text `#6f737a`); file-node fills stay folder-random.
 - Step-type taxonomy is single-sourced in `AIExplainService.ALLOWED_TYPES`; mirror any new type into `TYPE_COLORS` in the HTML so it gets a color (else grey fallback).
 - AI prompts live only in `AIExplainService` (`buildPrompt` = explanation prompt; `buildTypePrompt` = step-type classifier prompt; `buildChatPrompt` = follow-up chat prompt; system messages in `callExplanationModel` / `callTypeModel` / `callChatModel`). Model/endpoint/timeout constants live in that file. Current GPT-5.x chat-completion calls should not set non-default `temperature`.
 - Step view connections: `memberof` = file→method (containment), `methodcall` = method→method (call); file→file `calls` edges are NOT drawn during the step view. Each step carries one `focusNodes` file + one `focusMethod`; step 1 is the home file/method (anchor) and stays lit across all steps (cumulative).
@@ -71,7 +71,7 @@ This branch reduces graph size and UI lag by changing the main repository map fr
 - **Known Java caveat:** Object creation and constructor-heavy patterns may connect one file to many others in Java codebases, especially when dependency setup happens in a central class. Do not solve this immediately, but keep the edge metadata rich enough that this can be filtered or weighted later.
 - **AI remains method-based:** The AI explanation flow should still operate on methods and focused method-level context, even though the main graph is file-level.
 - **Method selection entry points:** Users should be able to trigger method explanations in two ways:
-  - Right-click a method in the code editor and choose "Explain with CodeMap".
+  - Right-click a method in the code editor and choose "Explain with Codesidian".
   - Open a file-to-file edge's method-call list and choose one of the methods shown there.
 - **Navigate to method code:** Double-clicking a method from an edge's method-call list should navigate to that method in the editor.
 - **Generated step details:** The AI response should include both the step summary shown in the list and a more thorough explanation for each step. Generate the thorough per-step response during the first AI call; do not make another AI request when the user clicks a step.
@@ -103,8 +103,8 @@ All AI output must be validated against known graph node IDs and edge IDs before
 
 ### Flow 1: Repository map
 
-1. User opens the CodeMap tool window.
-2. CodeMap shows a general Obsidian-style repository map.
+1. User opens the Codesidian tool window.
+2. Codesidian shows a general Obsidian-style repository map.
 3. The initial graph should be high-level enough to stay readable.
 4. Nodes can represent folders, files, classes, functions, tests, external dependencies, or other useful code entities.
 5. User can click nodes to inspect or focus them.
@@ -113,8 +113,8 @@ All AI output must be validated against known graph node IDs and edge IDs before
 ### Flow 2: Explain from graph
 
 1. User clicks or right-clicks a node in the graph.
-2. User chooses something like “Explain with CodeMap”.
-3. CodeMap extracts a focused subgraph around the selected node.
+2. User chooses something like “Explain with Codesidian”.
+3. Codesidian extracts a focused subgraph around the selected node.
 4. The AI receives the selected node, focused graph, and relevant code snippets.
 5. AI returns a structured step-by-step explanation.
 6. The frontend displays the steps in a side panel.
@@ -124,17 +124,17 @@ All AI output must be validated against known graph node IDs and edge IDs before
 For the `clean_up` target graph, the graph flow should become method selection from a file-level map:
 
 1. User clicks a file node or file-to-file edge.
-2. If an edge is selected, CodeMap shows the aggregated method-call list for that file-to-file connection.
+2. If an edge is selected, Codesidian shows the aggregated method-call list for that file-to-file connection.
 3. User chooses a method from that list, or double-clicks the method to navigate to its code.
-4. CodeMap extracts focused method-level explanation context around the selected method.
+4. Codesidian extracts focused method-level explanation context around the selected method.
 5. AI returns a structured step-by-step explanation, including both short list text and longer per-step detail text.
 6. Clicking a step shows the already-generated detail text and plays only that step's predefined type animation.
 
 ### Flow 3: Explain from editor
 
 1. User right-clicks a function/file/class in the IntelliJ editor.
-2. User selects “Visualize with CodeMap” or “Explain with CodeMap”.
-3. CodeMap opens the tool window.
+2. User selects “Visualize with Codesidian” or “Explain with Codesidian”.
+3. Codesidian opens the tool window.
 4. The graph focuses on the selected code element.
 5. AI generates a step-by-step explanation for the focused subgraph.
 6. The user can interact with the graph and explanation steps.
@@ -153,7 +153,7 @@ This should be cached locally so that big repositories do not need to regenerate
 Possible cache location:
 
 ```text
-.codemap/cache.json
+.codesidian/cache.json
 ```
 
 The cache should include:
@@ -168,7 +168,7 @@ For MVP, simple cache invalidation is acceptable. For example, regenerate when t
 
 ### Layer 2: Focused explanation mode
 
-When the user selects a file/function/class, CodeMap should extract a smaller focused subgraph around it.
+When the user selects a file/function/class, Codesidian should extract a smaller focused subgraph around it.
 
 The focused subgraph should answer questions like:
 
@@ -245,7 +245,7 @@ For MVP, the animations can be simple:
 
 ### Layer 5: Optional error visualization
 
-If time allows, CodeMap may show errors or warnings on the graph.
+If time allows, Codesidian may show errors or warnings on the graph.
 
 Examples:
 
@@ -266,9 +266,9 @@ The backend is an IntelliJ plugin, preferably written in Kotlin.
 Backend responsibilities:
 
 - Register IntelliJ actions:
-  - “Open CodeMap”
-  - “Visualize with CodeMap”
-  - “Explain with CodeMap”
+  - “Open Codesidian”
+  - “Visualize with Codesidian”
+  - “Explain with Codesidian”
 - Detect the selected file/function/class from the editor when possible.
 - Build the deterministic repo graph.
 - Cache and load the repo graph from local project files.
@@ -550,25 +550,25 @@ Main local commands:
 The demo should show:
 
 1. A developer opens an unfamiliar repo.
-2. CodeMap displays a visual repo map.
-3. The developer right-clicks a function and selects “Explain with CodeMap”.
+2. Codesidian displays a visual repo map.
+3. The developer right-clicks a function and selects “Explain with Codesidian”.
 4. The graph focuses on related files/functions.
 5. AI produces a step-by-step explanation.
 6. Each step highlights and animates the relevant nodes/edges.
 7. The developer can click a node to jump to the source file.
-8. The final message is that CodeMap helps developers understand unfamiliar code and make safer changes.
+8. The final message is that Codesidian helps developers understand unfamiliar code and make safer changes.
 
 ---
 
 ## Naming
 
-Current product name: CodeMap.
+Current product name: Codesidian.
 
 Possible UI labels:
 
-- Open CodeMap
-- Visualize with CodeMap
-- Explain with CodeMap
+- Open Codesidian
+- Visualize with Codesidian
+- Explain with Codesidian
 - Focus Mode
 - Repository Map
 - Step View

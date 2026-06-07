@@ -128,10 +128,10 @@ $snipStr
     val selStr = sel?.let { "${it.type} \"${it.label}\" (id=${it.id})" } ?: selectedId
     val snipStr = snippets.entries.joinToString("\n\n") { "// ${it.key}\n${it.value}" }
     val historyStr = history.takeLast(6).joinToString("\n\n") { (q, a) ->
-      "User: ${q.take(800)}\nCodeMap: ${a.take(1200)}"
+      "User: ${q.take(800)}\nCodesidian: ${a.take(1200)}"
     }
     return """
-You are answering a follow-up question about a CodeMap explanation.
+You are answering a follow-up question about a Codesidian explanation.
 The graph was extracted deterministically from the IDE.
 Only use the provided graph, explanation, and snippets. Do not invent files, functions, edges, or dependencies.
 If the provided context is insufficient, say what is missing.
@@ -201,7 +201,7 @@ $question
       model = CHAT_MODEL,
       reasoningEffort = reasoningEffort,
       timeout = Duration.ofSeconds(45),
-      systemMessage = "You answer CodeMap follow-up questions and return only valid JSON.",
+      systemMessage = "You answer Codesidian follow-up questions and return only valid JSON.",
       prompt = prompt
     )
 
@@ -377,7 +377,7 @@ Return JSON only:
   private fun mock(
     selectedId: String,
     focused: GraphData,
-    riskNote: String = "Set OPENAI_API_KEY for AI-generated explanations."
+    riskNote: String = "Set OPENAI_API_KEY for Codesidian AI-generated explanations."
   ): AIExplanationResponse {
     val byId = focused.nodes.associateBy { it.id }
     val sel = byId[selectedId]
@@ -391,7 +391,7 @@ Return JSON only:
     val steps = mutableListOf(
       AIExplanationStep("step-1", "Entry point", "orchestration",
         "$selLabel is the focus of this view.",
-        "CodeMap is showing an offline explanation because the AI call is unavailable. This selected method or file is the starting point for the focused walkthrough.",
+        "Codesidian is showing an offline explanation because the AI call is unavailable. This selected method or file is the starting point for the focused walkthrough.",
         listOf(focusId))
     )
     val cycle = listOf("processing", "external-call", "persistence", "validation", "ui")
@@ -417,7 +417,7 @@ Return JSON only:
     repoGraph: GraphData,
     focused: GraphData,
     explanation: AIExplanationResponse,
-    riskNote: String = "Set OPENAI_API_KEY for AI follow-up answers."
+    riskNote: String = "Set OPENAI_API_KEY for Codesidian AI follow-up answers."
   ): String {
     val selectedLabel = focused.nodes.find { it.id == selectedId }?.label ?: selectedId.removePrefix("method:")
     val stepCount = explanation.steps.size

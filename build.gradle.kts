@@ -1,7 +1,8 @@
+import org.jetbrains.intellij.platform.gradle.tasks.RunIdeTask
+
 plugins {
-    id("java")
-    id("org.jetbrains.kotlin.jvm") version "1.9.22"
-    id("org.jetbrains.intellij") version "1.17.4"
+    id("org.jetbrains.kotlin.jvm") version "2.4.0"
+    id("org.jetbrains.intellij.platform") version "2.16.0"
 }
 
 group = "com.hackdelft"
@@ -9,33 +10,42 @@ version = "1.0.0"
 
 repositories {
     mavenCentral()
+    intellijPlatform {
+        defaultRepositories()
+    }
 }
 
-intellij {
-    version.set("2023.2.5")
-    type.set("IC")
-    plugins.set(listOf("com.intellij.java"))
+dependencies {
+    intellijPlatform {
+        // IntelliJ IDEA Community 2025.2.1 — matches the locally installed IDE.
+        create("IC", "2025.2.1")
+        bundledPlugin("com.intellij.java")
+    }
+}
+
+intellijPlatform {
+    pluginConfiguration {
+        ideaVersion {
+            sinceBuild = "252"
+            // Leave the upper bound open so the plugin keeps loading in newer IDEs.
+            untilBuild = provider { null }
+        }
+    }
 }
 
 kotlin {
-    jvmToolchain(17)
+    jvmToolchain(21)
 }
 
-tasks {
-    patchPluginXml {
-        sinceBuild.set("232")
-        untilBuild.set("243.*")
-    }
-
-    runIde {
-        val envFile = file(".env")
-        if (envFile.exists()) {
-            envFile.readLines()
-                .firstOrNull { it.startsWith("OPENAI_API_KEY=") }
-                ?.substringAfter("=")
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?.let { key -> jvmArgs("-Dopenai.api.key=$key") }
-        }
+// Pass the local .env OPENAI_API_KEY into the sandbox IDE as -Dopenai.api.key (read by AIExplainService).
+tasks.withType<RunIdeTask>().configureEach {
+    val envFile = file(".env")
+    if (envFile.exists()) {
+        envFile.readLines()
+            .firstOrNull { it.startsWith("OPENAI_API_KEY=") }
+            ?.substringAfter("=")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { key -> jvmArgs("-Dopenai.api.key=$key") }
     }
 }

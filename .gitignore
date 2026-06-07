@@ -1,6 +1,7 @@
 # Gradle / IntelliJ plugin
 .gradle/
 build/
+.intellijPlatform/
 .idea/
 *.iml
 
@@ -60,5 +61,5 @@ tmp/
 temp/
 *.local
 
-# CodeMap generated graph cache
-.codemap/
+# Codesidian generated graph cache
+.codesidian/

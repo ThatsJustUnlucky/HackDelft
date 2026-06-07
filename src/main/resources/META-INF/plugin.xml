@@ -1,6 +1,6 @@
 <idea-plugin>
     <id>com.hackdelft.codegraph</id>
-    <name>Code Graph</name>
+    <name>Codesidian</name>
     <vendor>HackDelft 2026</vendor>
     <description>Interactive file-level graph of your codebase with aggregated method call relationships and AI method explanations.</description>
 
@@ -9,7 +9,7 @@
 
     <extensions defaultExtensionNs="com.intellij">
         <toolWindow
-                id="Code Graph"
+                id="Codesidian"
                 secondary="false"
                 anchor="right"
                 factoryClass="com.hackdelft.codegraph.CodeGraphToolWindowFactory"/>
@@ -18,14 +18,15 @@
     <actions>
         <action id="com.hackdelft.codegraph.OpenInGraphViewAction"
                 class="com.hackdelft.codegraph.OpenInGraphViewAction"
-                text="Open in Graph View"
-                description="Highlight this method's file in the Code Graph tool window">
+                text="Open in Codesidian"
+                description="Reveal the current method or file in the Codesidian map">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="last"/>
         </action>
         <action id="com.hackdelft.codegraph.ExplainWithCodeMapAction"
                 class="com.hackdelft.codegraph.ExplainWithCodeMapAction"
-                text="Explain with CodeMap"
-                description="Generate an AI step-by-step explanation of this method in the Code Graph">
+                text="Explain with Codesidian"
+                description="Generate an AI step-by-step explanation of this method in Codesidian">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
         </action>
     </actions>

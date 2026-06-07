@@ -7,18 +7,32 @@ import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.psi.PsiMethod
 import com.intellij.psi.PsiReferenceExpression
 
-// Reveal the connections of the specific function under the caret (the method's name, or a call to it).
-class OpenInGraphViewAction : AnAction("Open in Graph View") {
+// Map the current code in Codesidian: reveal the method under the caret if there is one,
+// otherwise reveal the current file. Works from the editor and the Project view right-click.
+class OpenInGraphViewAction : AnAction("Open in Codesidian") {
 
     override fun actionPerformed(e: AnActionEvent) {
         val project = e.project ?: return
-        val methodId = methodIdAtCaret(e) ?: return
-        val tw = ToolWindowManager.getInstance(project).getToolWindow("Code Graph") ?: return
-        tw.show { CodeGraphPanel.getInstance(project)?.openMethodInGraph(methodId) }
+        val methodId = methodIdAtCaret(e)
+        val filePath = targetFilePath(e)
+        if (methodId == null && filePath == null) return
+        val tw = ToolWindowManager.getInstance(project).getToolWindow("Codesidian") ?: return
+        tw.show {
+            val panel = CodeGraphPanel.getInstance(project) ?: return@show
+            if (methodId != null) panel.openMethodInGraph(methodId)
+            else if (filePath != null) panel.openFileInGraph(filePath)
+        }
     }
 
     override fun update(e: AnActionEvent) {
-        e.presentation.isEnabledAndVisible = methodIdAtCaret(e) != null
+        e.presentation.isEnabledAndVisible = methodIdAtCaret(e) != null || targetFilePath(e) != null
+    }
+
+    // The file under the editor caret, or the file selected in the Project view; null for directories.
+    private fun targetFilePath(e: AnActionEvent): String? {
+        e.getData(CommonDataKeys.PSI_FILE)?.virtualFile?.let { return it.path }
+        val vf = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: return null
+        return if (vf.isDirectory) null else vf.path
     }
 
     // Only resolves when the caret sits on a function: its declaration name, or a reference/call to it.

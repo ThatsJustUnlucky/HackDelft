@@ -12,6 +12,7 @@ import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiManager
 import com.intellij.psi.search.GlobalSearchScope
 import com.intellij.ui.jcef.JBCefBrowser
+import com.intellij.ui.jcef.JBCefBrowserBase
 import com.intellij.ui.jcef.JBCefJSQuery
 import java.awt.BorderLayout
 import java.util.concurrent.Executors
@@ -24,7 +25,7 @@ class CodeGraphPanel(private val project: Project) {
   private val extractor = GraphDataExtractor(project)
   private val cache = GraphCache(project)
   private val aiService = AIExplainService(project.basePath)
-  private val jsQuery = JBCefJSQuery.create(browser)
+  private val jsQuery = JBCefJSQuery.create(browser as JBCefBrowserBase)
   private val bg = Executors.newSingleThreadExecutor()
 
   @Volatile
@@ -58,11 +59,11 @@ class CodeGraphPanel(private val project: Project) {
       override fun onLoadEnd(b: org.cef.browser.CefBrowser?, frame: org.cef.browser.CefFrame?, code: Int) {
         if (frame?.isMain == true) {
           val bridge = """
-            window.codemapSend=function(m){${jsQuery.inject("m")}};
-            window.navigateToNode=function(id){window.codemapSend(JSON.stringify({t:'nav',id:id}));};
-            window.explainNode=function(id){window.codemapSend(JSON.stringify({t:'explain',id:id}));};
-            window.codemapAsk=function(q,effort){window.codemapSend(JSON.stringify({t:'chat',q:q,effort:effort}));};
-            window.codemapRefresh=function(){window.codemapSend(JSON.stringify({t:'refresh'}));};
+            window.codesidianSend=function(m){${jsQuery.inject("m")}};
+            window.navigateToNode=function(id){window.codesidianSend(JSON.stringify({t:'nav',id:id}));};
+            window.explainNode=function(id){window.codesidianSend(JSON.stringify({t:'explain',id:id}));};
+            window.codesidianAsk=function(q,effort){window.codesidianSend(JSON.stringify({t:'chat',q:q,effort:effort}));};
+            window.codesidianRefresh=function(){window.codesidianSend(JSON.stringify({t:'refresh'}));};
           """.trimIndent()
           browser.cefBrowser.executeJavaScript(bridge, "", 0)
           refreshGraph()
@@ -77,6 +78,12 @@ class CodeGraphPanel(private val project: Project) {
   /** Open in Graph View: reveal a single method's connections (both directions) in the graph. */
   fun openMethodInGraph(methodId: String) {
     browser.cefBrowser.executeJavaScript("openMethodConnections(\"${methodId.e()}\");", "", 0)
+  }
+
+  /** Open in Codesidian: reveal a file's node, its neighbors, and its connections in the graph. */
+  fun openFileInGraph(filePath: String) {
+    val id = "file:" + filePath.replace('\\', '/')
+    browser.cefBrowser.executeJavaScript("openFileInGraph(\"${id.e()}\");", "", 0)
   }
 
   fun refreshGraph(force: Boolean = false) {
@@ -415,7 +422,7 @@ g.node,path.vis{transition:opacity .16s ease}
   <button class="btn active" id="btn-hidetests" onclick="toggleTestFiles('btn-hidetests')" title="Make all test files invisible">Hide Tests</button>
   <div class="sep"></div>
   <button class="btn" onclick="resetView()">Reset</button>
-  <button class="btn" onclick="window.codemapRefresh&&window.codemapRefresh()">Refresh</button>
+  <button class="btn" onclick="window.codesidianRefresh&&window.codesidianRefresh()">Refresh</button>
 </div>
 
 <div id="graph-wrap"><svg id="graph"></svg>
@@ -429,7 +436,7 @@ g.node,path.vis{transition:opacity .16s ease}
 
 <div id="steppanel" class="hidden">
   <div id="sp-head">
-    <span id="sp-title">✨ CodeMap Focus</span>
+    <span id="sp-title">✨ Codesidian Focus</span>
     <button class="sp-x" onclick="closePanel()">✕</button>
   </div>
   <div id="sp-summary"></div>
@@ -1014,6 +1021,30 @@ function openMethodConnections(mid){
   }
 }
 
+// Open in Codesidian (file): reveal a file node, its neighbors, and incident edges; open its call panel.
+function openFileInGraph(fid){
+  if(!rawNodes.length){setTimeout(function(){openFileInGraph(fid);},320);return;}
+  var node=nodeById[fid];
+  hoverLock=true; stepMode=false; selectedId=fid;
+  clearStepMethods();
+  if(!node){
+    closeMethodPanel(); resetCircleStrokes(); restoreView();
+    document.getElementById('selected-info').textContent='This file is not in the map';
+    return;
+  }
+  closeMethodPanel();
+  var keep={}; keep[fid]=1; adj[fid].forEach(function(id){keep[id]=1;});
+  resetCircleStrokes();
+  nodeSel.style('opacity',function(n){return keep[n.id]?1:0.08;});
+  nodeSel.select('text').style('display',function(n){return keep[n.id]?'block':'none';}).style('opacity',1);
+  nodeSel.filter(function(n){return n.id===fid;}).select('circle').attr('stroke','#fff').attr('stroke-width',3);
+  linkSel.select('path.vis').style('opacity',function(l){return (l.source.id===fid||l.target.id===fid)?0.95:0.04;});
+  openNodePanel(node);
+  document.getElementById('selected-info').textContent='▶ '+node.label;
+  var pts=[node]; adj[fid].forEach(function(id){if(nodeById[id])pts.push(nodeById[id]);});
+  fitTo(pts,110);
+}
+
 // ---- AI explain: steps + method overlay ----
 function openPanelLoading(){
   closeMethodPanel(); stepMode=true; hoverLock=true;
@@ -1085,7 +1116,7 @@ function sendChat(){
   appendChatMessage('user',q);
   chatPending=true;
   setChatEnabled(true);
-  if(window.codemapAsk) window.codemapAsk(q,chatEffort);
+  if(window.codesidianAsk) window.codesidianAsk(q,chatEffort);
   else appendChatAnswer('Follow-up chat is not ready yet.', true);
 }
 
