@@ -25,6 +25,8 @@ class AIExplainService(private val projectBasePath: String? = null) {
     private const val EXPLANATION_MODEL = "gpt-5.5"
     private const val EXPLANATION_REASONING_EFFORT = "high"
     private const val TYPE_MODEL = "gpt-5.4-nano"
+    private const val CHAT_MODEL = "gpt-5.5"
+    private const val CHAT_REASONING_EFFORT_DEFAULT = "medium"
     private const val ENDPOINT = "https://api.openai.com/v1/chat/completions"
   }
 
@@ -47,6 +49,32 @@ class AIExplainService(private val projectBasePath: String? = null) {
       mock(selectedId, focused, "OpenAI request failed: ${e.message ?: e.javaClass.simpleName}")
     }
     return pinAnchorAndSingleFile(raw, focused, anchorId, selectedId)
+  }
+
+  fun answerFollowUp(
+    selectedId: String,
+    repoGraph: GraphData,
+    focused: GraphData,
+    snippets: Map<String, String>,
+    explanation: AIExplanationResponse,
+    question: String,
+    reasoningEffort: String = CHAT_REASONING_EFFORT_DEFAULT,
+    history: List<Pair<String, String>> = emptyList()
+  ): String {
+    val q = question.trim()
+    if (q.isBlank()) return ""
+    val key = apiKey
+    if (key == null) return mockFollowUp(selectedId, repoGraph, focused, explanation)
+    return try {
+      val raw = callChatModel(
+        key = key,
+        prompt = buildChatPrompt(selectedId, repoGraph, focused, snippets, explanation, q, history),
+        reasoningEffort = chatReasoningEffort(reasoningEffort)
+      )
+      parseChatAnswer(raw).ifBlank { mockFollowUp(selectedId, repoGraph, focused, explanation) }
+    } catch (e: Exception) {
+      mockFollowUp(selectedId, repoGraph, focused, explanation, "OpenAI request failed: ${e.message ?: e.javaClass.simpleName}")
+    }
   }
 
   // --- prompt ---
@@ -87,10 +115,57 @@ $snipStr
 """.trim()
   }
 
-  private fun graphToJson(d: GraphData): String {
+  private fun buildChatPrompt(
+    selectedId: String,
+    repoGraph: GraphData,
+    focused: GraphData,
+    snippets: Map<String, String>,
+    explanation: AIExplanationResponse,
+    question: String,
+    history: List<Pair<String, String>>
+  ): String {
+    val sel = focused.nodes.find { it.id == selectedId }
+    val selStr = sel?.let { "${it.type} \"${it.label}\" (id=${it.id})" } ?: selectedId
+    val snipStr = snippets.entries.joinToString("\n\n") { "// ${it.key}\n${it.value}" }
+    val historyStr = history.takeLast(6).joinToString("\n\n") { (q, a) ->
+      "User: ${q.take(800)}\nCodeMap: ${a.take(1200)}"
+    }
+    return """
+You are answering a follow-up question about a CodeMap explanation.
+The graph was extracted deterministically from the IDE.
+Only use the provided graph, explanation, and snippets. Do not invent files, functions, edges, or dependencies.
+If the provided context is insufficient, say what is missing.
+Keep the answer concise and practical.
+
+Use the highlighted explanation context as the main thread of the answer.
+Use the whole repository graph as broader context when the question asks about other files, tests, inheritance, or repository-wide relationships.
+
+Return JSON only:
+{"answer": string}
+
+Selected node: $selStr
+
+Highlighted/focused graph (JSON): ${graphToJson(focused)}
+
+Generated explanation (JSON): ${explanationPromptJson(explanation)}
+
+Whole repository graph (JSON): ${graphToJson(repoGraph, maxCallsPerEdge = 8)}
+
+Previous follow-up chat:
+$historyStr
+
+Relevant snippets:
+$snipStr
+
+User question:
+$question
+""".trim()
+  }
+
+  private fun graphToJson(d: GraphData, maxCallsPerEdge: Int = 20): String {
     val nodes = d.nodes.joinToString(",") { """{"id":"${it.id.j()}","label":"${it.label.j()}","type":"${it.type}","folder":"${it.folder.j()}"}""" }
     val edges = d.edges.joinToString(",") { edge ->
-      val calls = edge.methodCalls.take(20).joinToString(",") { call ->
+      val calls = edge.methodCalls.take(maxCallsPerEdge).joinToString(",") { call ->
         """{"callerMethod":"${call.callerMethod.j()}","targetMethod":"${call.targetMethod.j()}","callerLine":${call.callerLine},"targetLine":${call.targetLine}}"""
       }
       """{"source":"${edge.source.j()}","target":"${edge.target.j()}","type":"${edge.type}","methodCalls":[$calls]}"""
@@ -117,6 +192,16 @@ $snipStr
       reasoningEffort = null,
       timeout = Duration.ofSeconds(20),
       systemMessage = "You classify explanation steps into an allowed taxonomy and return only valid JSON.",
+      prompt = prompt
+    )
+
+  private fun callChatModel(key: String, prompt: String, reasoningEffort: String): String =
+    callOpenAI(
+      key = key,
+      model = CHAT_MODEL,
+      reasoningEffort = reasoningEffort,
+      timeout = Duration.ofSeconds(45),
+      systemMessage = "You answer CodeMap follow-up questions and return only valid JSON.",
       prompt = prompt
     )
 
@@ -195,6 +280,20 @@ Return JSON only:
       if (id == null || type == null) null else id to type
     }.toMap()
   }
+
+  private fun parseChatAnswer(json: String): String =
+    try {
+      JsonParser.parseString(json).asJsonObject.str("answer") ?: ""
+    } catch (_: Exception) {
+      ""
+    }
+
+  private fun chatReasoningEffort(value: String): String =
+    when (value.trim().lowercase()) {
+      "low", "medium", "high", "xhigh" -> value.trim().lowercase()
+      "extra high", "extra-high", "extra_high" -> "xhigh"
+      else -> CHAT_REASONING_EFFORT_DEFAULT
+    }
 
   // --- parsing + validation ---
 
@@ -311,6 +410,27 @@ Return JSON only:
       riskNotes = listOf(riskNote),
       suggestedNextNodes = neighbors.take(3)
     )
+  }
+
+  private fun mockFollowUp(
+    selectedId: String,
+    repoGraph: GraphData,
+    focused: GraphData,
+    explanation: AIExplanationResponse,
+    riskNote: String = "Set OPENAI_API_KEY for AI follow-up answers."
+  ): String {
+    val selectedLabel = focused.nodes.find { it.id == selectedId }?.label ?: selectedId.removePrefix("method:")
+    val stepCount = explanation.steps.size
+    return "$riskNote Offline context: $selectedLabel has $stepCount explanation steps, ${focused.edges.size} highlighted graph edges, and ${repoGraph.nodes.size} files in the full repository graph. Use the step list and highlighted files as the main context, then inspect the repository map for wider relationships."
+  }
+
+  private fun explanationPromptJson(r: AIExplanationResponse): String {
+    val steps = r.steps.joinToString(",") { s ->
+      val focusNodes = s.focusNodes.joinToString(",") { """"${it.j()}"""" }
+      """{"id":"${s.id.j()}","title":"${s.title.j()}","type":"${s.type.j()}","explanation":"${s.explanation.j()}","detail":"${s.detail.j()}","focusNodes":[$focusNodes],"focusMethod":"${s.focusMethod.j()}"}"""
+    }
+    val risks = r.riskNotes.joinToString(",") { """"${it.j()}"""" }
+    return """{"summary":"${r.summary.j()}","steps":[$steps],"riskNotes":[$risks]}"""
   }
 
   private fun loadApiKey(): String? =

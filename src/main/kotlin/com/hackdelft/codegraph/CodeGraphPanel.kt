@@ -29,6 +29,17 @@ class CodeGraphPanel(private val project: Project) {
 
   @Volatile
   private var currentGraph: GraphData? = null
+  @Volatile
+  private var currentExplanation: ExplainContext? = null
+
+  private data class ExplainContext(
+    val selectedId: String,
+    val repoGraph: GraphData,
+    val focused: GraphData,
+    val snippets: Map<String, String>,
+    val response: AIExplanationResponse,
+    val history: MutableList<Pair<String, String>> = mutableListOf()
+  )
 
   companion object {
     private val instances = mutableMapOf<Project, CodeGraphPanel>()
@@ -50,6 +61,7 @@ class CodeGraphPanel(private val project: Project) {
             window.codemapSend=function(m){${jsQuery.inject("m")}};
             window.navigateToNode=function(id){window.codemapSend(JSON.stringify({t:'nav',id:id}));};
             window.explainNode=function(id){window.codemapSend(JSON.stringify({t:'explain',id:id}));};
+            window.codemapAsk=function(q,effort){window.codemapSend(JSON.stringify({t:'chat',q:q,effort:effort}));};
             window.codemapRefresh=function(){window.codemapSend(JSON.stringify({t:'refresh'}));};
           """.trimIndent()
           browser.cefBrowser.executeJavaScript(bridge, "", 0)
@@ -80,6 +92,7 @@ class CodeGraphPanel(private val project: Project) {
   /** Flow 2/3: build a focused subgraph around [nodeId], ask the AI for typed steps, push to the UI. */
   fun explainNode(nodeId: String) {
     // Show the loading panel right away so the editor-triggered flow gives instant feedback during the long AI call.
+    currentExplanation = null
     browser.cefBrowser.executeJavaScript("openPanelLoading();", "", 0)
     bg.submit {
       try {
@@ -89,6 +102,7 @@ class CodeGraphPanel(private val project: Project) {
         val snippets = collectSnippets(focused, nodeId)
         val anchorId = if (nodeId.startsWith("file:")) nodeId else filePath?.let { "file:$it" }
         val response = aiService.explain(nodeId, focused, snippets, anchorId)
+        currentExplanation = ExplainContext(nodeId, full, focused, snippets, response)
         // Add the used-method overlay (visible only during the step view), then show the steps.
         // showExplanation auto-plays step 0 (anchor-only highlight + camera fit).
         // Don't call focusNode here: it re-lights the node's neighbors and overrides the step highlight.
@@ -105,7 +119,33 @@ class CodeGraphPanel(private val project: Project) {
     when (obj.get("t")?.asString) {
       "nav" -> obj.get("id")?.asString?.let { navigateTo(it) }
       "explain" -> obj.get("id")?.asString?.let { explainNode(it) }
+      "chat" -> obj.get("q")?.asString?.let { answerChat(it, obj.get("effort")?.asString ?: "medium") }
       "refresh" -> refreshGraph(force = true)
+    }
+  }
+
+  private fun answerChat(question: String, reasoningEffort: String) {
+    val q = question.trim()
+    if (q.isBlank()) return
+    bg.submit {
+      val ctx = currentExplanation
+      if (ctx == null) {
+        browser.cefBrowser.executeJavaScript("appendChatAnswer(\"Open an explanation before asking a follow-up.\", true);", "", 0)
+        return@submit
+      }
+      val answer = aiService.answerFollowUp(
+        selectedId = ctx.selectedId,
+        repoGraph = ctx.repoGraph,
+        focused = ctx.focused,
+        snippets = ctx.snippets,
+        explanation = ctx.response,
+        question = q,
+        reasoningEffort = reasoningEffort,
+        history = ctx.history.toList()
+      )
+      if (currentExplanation !== ctx) return@submit
+      ctx.history += q to answer
+      browser.cefBrowser.executeJavaScript("appendChatAnswer(\"${answer.e()}\", false);", "", 0)
     }
   }
 
@@ -266,6 +306,8 @@ body{display:flex;flex-direction:column}
 .btn{background:#1e1f22;color:#dfe1e5;border:1px solid #393b40;padding:7px 13px;cursor:pointer;border-radius:8px;font-size:12px;font-weight:500;transition:all .15s;white-space:nowrap}
 .btn:hover{background:#43454a;border-color:#548af7;color:#548af7}
 .btn.active{background:#3a2424;border-color:#db5c5c;color:#db5c5c}
+.btn:disabled{opacity:.45;cursor:default}
+.btn:disabled:hover{background:#1e1f22;border-color:#393b40;color:#dfe1e5}
 .sep{width:1px;height:26px;background:#393b40;margin:0 2px}
 #stats{color:#6f737a;font-size:11px;white-space:nowrap}
 #selected-info{color:#548af7;font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -306,6 +348,22 @@ g.node,path.vis{transition:opacity .16s ease}
 #sp-risks:empty{display:none}
 #sp-actions{flex-shrink:0;padding:10px 14px;border-top:1px solid #393b40}
 #sp-actions .btn{width:100%}
+#sp-chat{flex-shrink:0;border-top:1px solid #393b40;padding:10px 14px;background:#25272a}
+#sp-chat-log{max-height:112px;overflow:auto;display:flex;flex-direction:column;gap:6px;margin-bottom:8px;transition:max-height .16s ease}
+.chat-msg{font-size:11px;line-height:1.45;border:1px solid #393b40;border-radius:8px;padding:7px 8px;white-space:pre-wrap}
+.chat-msg.user{align-self:flex-end;max-width:88%;background:#24314f;color:#dfe1e5;border-color:#548af7}
+.chat-msg.ai{align-self:flex-start;max-width:94%;background:#1e1f22;color:#bcbec4}
+.chat-msg.error{align-self:flex-start;max-width:94%;background:#3a2424;color:#db5c5c;border-color:#db5c5c}
+#sp-chat-form{display:flex;gap:6px}
+#sp-chat-q{flex:1;min-width:0;background:#1e1f22;border:1px solid #393b40;border-radius:8px;padding:7px 9px;color:#dfe1e5;font-size:12px;outline:none}
+#sp-chat-q:focus{border-color:#548af7}
+#sp-chat-q:disabled{opacity:.55}
+#sp-chat-send{padding-left:10px;padding-right:10px}
+#sp-chat-effort{display:flex;align-items:center;justify-content:flex-end;gap:7px;margin-bottom:8px;color:#6f737a;font-size:11px}
+#sp-chat.has-response #sp-chat-log{max-height:164px}
+#sp-chat-effort select{width:92px;background:#1e1f22;border:1px solid #393b40;border-radius:6px;color:#bcbec4;padding:3px 5px;font-size:11px;outline:none;cursor:pointer}
+#sp-chat-effort select:focus{border-color:#548af7}
+#sp-chat-effort select:disabled{opacity:.55;cursor:default}
 #methodpanel{position:fixed;top:52px;right:0;bottom:32px;width:380px;background:#2b2d30F2;backdrop-filter:blur(4px);border-left:1px solid #393b40;display:flex;flex-direction:column;z-index:11;box-shadow:-6px 0 22px rgba(0,0,0,.4)}
 #methodpanel.hidden{display:none}
 #mp-head{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #393b40}
@@ -365,6 +423,22 @@ g.node,path.vis{transition:opacity .16s ease}
   <div id="sp-steps"></div>
   <div id="sp-risks"></div>
   <div id="sp-actions"><button class="btn" onclick="showAllSteps()">Show All Steps</button></div>
+  <div id="sp-chat">
+    <div id="sp-chat-log"></div>
+    <div id="sp-chat-effort">
+      <span>Reasoning</span>
+      <select id="sp-chat-effort-select" onchange="setChatEffort(this.value)">
+        <option value="low">Low</option>
+        <option value="medium" selected>Medium</option>
+        <option value="high">High</option>
+        <option value="xhigh">Extra High</option>
+      </select>
+    </div>
+    <div id="sp-chat-form">
+      <input id="sp-chat-q" type="text" placeholder="Ask a follow-up..." onkeydown="chatKey(event)">
+      <button class="btn" id="sp-chat-send" onclick="sendChat()">Send</button>
+    </div>
+  </div>
 </div>
 
 <div id="methodpanel" class="hidden">
@@ -395,6 +469,8 @@ var rawNodes = [], rawLinks = [], nodeById = {}, adj = {}, folderAngle = {};
 var nodeSel = null, linkSel = null;
 var selectedId = null, hoverLock = false, stepMode = false;
 var currentSteps = [], currentMethodCalls = [];
+var chatPending = false;
+var chatEffort = 'medium';
 var overlayMethods = [], overlayCalls = [];
 var hiddenTypes = {calls:false, inherits:false, tests:false};
 var hideTests = true;
@@ -817,11 +893,14 @@ function openMethodConnections(mid){
 // ---- AI explain: steps + method overlay ----
 function openPanelLoading(){
   closeMethodPanel(); stepMode=true; hoverLock=true;
+  currentSteps=[];
   document.getElementById('steppanel').classList.remove('hidden');
   document.getElementById('sp-summary').textContent='Generating explanation…';
   document.getElementById('sp-detail').textContent='';
   document.getElementById('sp-steps').innerHTML='';
   document.getElementById('sp-risks').innerHTML='';
+  resetChat();
+  setChatEnabled(false);
 }
 
 function showExplanation(resp){
@@ -842,7 +921,68 @@ function showExplanation(resp){
   document.getElementById('sp-steps').innerHTML=html;
   var risks=(resp&&resp.riskNotes)||[];
   document.getElementById('sp-risks').innerHTML=risks.length?('⚠ '+risks.map(escapeHtml).join('<br>⚠ ')):'';
+  resetChat();
+  setChatEnabled(true);
   if(currentSteps.length) playStep(0);
+}
+
+function resetChat(){
+  var chat=document.getElementById('sp-chat'), log=document.getElementById('sp-chat-log');
+  if(chat) chat.classList.remove('has-response');
+  if(log) log.innerHTML='';
+  chatPending=false;
+  chatEffort='medium';
+  var sel=document.getElementById('sp-chat-effort-select');
+  if(sel) sel.value='medium';
+}
+
+function setChatEnabled(enabled){
+  var q=document.getElementById('sp-chat-q'), b=document.getElementById('sp-chat-send'), sel=document.getElementById('sp-chat-effort-select');
+  if(q) q.disabled=!enabled||chatPending;
+  if(b){b.disabled=!enabled||chatPending;b.textContent=chatPending?'...':'Send';}
+  if(sel) sel.disabled=!enabled||chatPending;
+}
+
+function setChatEffort(v){
+  chatEffort=(v==='low'||v==='high'||v==='xhigh')?v:'medium';
+}
+
+function chatKey(e){
+  if(e.key==='Enter'){e.preventDefault();sendChat();}
+}
+
+function sendChat(){
+  if(chatPending) return;
+  var input=document.getElementById('sp-chat-q');
+  if(!input) return;
+  var q=input.value.trim();
+  if(!q) return;
+  input.value='';
+  appendChatMessage('user',q);
+  chatPending=true;
+  setChatEnabled(true);
+  if(window.codemapAsk) window.codemapAsk(q,chatEffort);
+  else appendChatAnswer('Follow-up chat is not ready yet.', true);
+}
+
+function appendChatMessage(role,text){
+  var log=document.getElementById('sp-chat-log');
+  if(!log) return;
+  var msg=document.createElement('div');
+  msg.className='chat-msg '+role;
+  msg.textContent=text||'';
+  log.appendChild(msg);
+  log.scrollTop=log.scrollHeight;
+}
+
+function appendChatAnswer(text,isError){
+  var chat=document.getElementById('sp-chat');
+  if(chat) chat.classList.add('has-response');
+  appendChatMessage(isError?'error':'ai',text);
+  chatPending=false;
+  setChatEnabled(currentSteps.length>0);
+  var q=document.getElementById('sp-chat-q');
+  if(q) q.focus();
 }
 
 function playStep(i){
