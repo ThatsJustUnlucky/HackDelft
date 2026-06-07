@@ -591,8 +591,8 @@ function buildSim(){
     .force('charge', d3.forceManyBody().strength(function(d){return (-130-11*d.deg)*fx.repel;}).distanceMax(520))
     .force('link', d3.forceLink(rawLinks).id(function(d){return d.id;}).distance(function(l){return (64+radius(l.source)+radius(l.target))*fx.linkDist;}).strength(0.16))
     .force('collide', d3.forceCollide(function(d){return radius(d)+8;}).iterations(2))
-    .force('x', d3.forceX(folderX).strength(fx.cluster))
-    .force('y', d3.forceY(folderY).strength(fx.cluster))
+    .force('radial', d3.forceRadial(Math.min(W(),H()) * 0.35, W()/2, H()/2).strength(fx.cluster))
+
     .velocityDecay(0.30).alpha(0.9).alphaDecay(0.024)
     .on('tick', ticked);
 }
