@@ -300,15 +300,20 @@ body{display:flex;flex-direction:column}
 #graph-wrap{flex:1;min-height:0;position:relative}
 #graph{display:block;width:100%;height:100%;background:#1e1f22}
 #statusbar{flex-shrink:0;height:32px;background:#2b2d30;border-top:1px solid #393b40;display:flex;align-items:center;padding:0 12px;gap:18px}
-#search{flex:1;max-width:240px;background:#1e1f22;border:1px solid #393b40;border-radius:8px;padding:7px 12px;color:#dfe1e5;font-size:13px;outline:none}
-#search:focus{border-color:#548af7}
-#search::placeholder{color:#6f737a}
+.top-search{flex:1;max-width:240px;background:#1e1f22;border:1px solid #393b40;border-radius:8px;padding:7px 12px;color:#dfe1e5;font-size:13px;outline:none}
+.top-search:focus{border-color:#548af7}
+.top-search::placeholder{color:#6f737a}
 .btn{background:#1e1f22;color:#dfe1e5;border:1px solid #393b40;padding:7px 13px;cursor:pointer;border-radius:8px;font-size:12px;font-weight:500;transition:all .15s;white-space:nowrap}
 .btn:hover{background:#43454a;border-color:#548af7;color:#548af7}
 .btn.active{background:#3a2424;border-color:#db5c5c;color:#db5c5c}
 .btn:disabled{opacity:.45;cursor:default}
 .btn:disabled:hover{background:#1e1f22;border-color:#393b40;color:#dfe1e5}
 .sep{width:1px;height:26px;background:#393b40;margin:0 2px}
+.menu-wrap{position:relative;flex-shrink:0}
+.menu{position:absolute;top:36px;left:0;z-index:30;width:150px;background:#2b2d30;border:1px solid #393b40;border-radius:8px;padding:6px;box-shadow:0 10px 24px rgba(0,0,0,.45)}
+.menu.hidden{display:none}
+.menu .btn{display:block;width:100%;text-align:left;margin-bottom:5px}
+.menu .btn:last-child{margin-bottom:0}
 #stats{color:#6f737a;font-size:11px;white-space:nowrap}
 #selected-info{color:#548af7;font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .legend{display:flex;align-items:center;gap:5px;color:#6f737a;font-size:11px;white-space:nowrap}
@@ -369,6 +374,10 @@ g.node,path.vis{transition:opacity .16s ease}
 #mp-head{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;padding:12px 14px;border-bottom:1px solid #393b40}
 #mp-title{color:#548af7;font-weight:600;font-size:13px}
 #mp-summary{flex-shrink:0;padding:10px 14px;color:#bcbec4;font-size:12px;line-height:1.4;border-bottom:1px solid #393b40}
+#mp-search-wrap{flex-shrink:0;padding:8px 14px;border-bottom:1px solid #393b40}
+#mp-search{width:100%;background:#1e1f22;border:1px solid #393b40;border-radius:8px;padding:7px 10px;color:#dfe1e5;font-size:12px;outline:none}
+#mp-search:focus{border-color:#548af7}
+#mp-search::placeholder{color:#6f737a}
 #mp-methods{flex:1;overflow:auto;padding:8px}
 .mp-call{background:#1e1f22;border:1px solid #393b40;border-radius:8px;padding:9px;margin-bottom:8px}
 .mp-line{display:flex;align-items:center;gap:6px;color:#6f737a;font-size:11px;margin-bottom:8px}
@@ -388,15 +397,20 @@ g.node,path.vis{transition:opacity .16s ease}
 </style></head><body>
 
 <div id="topbar">
-  <input id="search" type="text" placeholder="Search files..." oninput="searchNodes(this.value)">
+  <input id="search" class="top-search" type="text" placeholder="Search files..." oninput="searchNodes(this.value)">
+  <input id="method-search" class="top-search" type="text" placeholder="Search methods..." oninput="searchMethods(this.value)">
   <div class="sep"></div>
   <button class="btn" onclick="fitAll()">Fit</button>
   <button class="btn" onclick="relayout()">Re-layout</button>
-  <button class="btn" onclick="toggleFx()">⚙ Forces</button>
-  <div class="sep"></div>
-  <button class="btn" id="btn-calls" onclick="toggleEdgeType('calls','btn-calls')">Calls</button>
-  <button class="btn" id="btn-inherits" onclick="toggleEdgeType('inherits','btn-inherits')">Inherits</button>
-  <button class="btn" id="btn-tests" onclick="toggleEdgeType('tests','btn-tests')">Tests</button>
+  <div class="menu-wrap">
+    <button class="btn" onclick="toggleViewMenu(event)">Controls ▾</button>
+    <div id="viewmenu" class="menu hidden">
+      <button class="btn" onclick="toggleFx();closeViewMenu()">Forces</button>
+      <button class="btn" id="btn-calls" onclick="toggleEdgeType('calls','btn-calls')">Calls</button>
+      <button class="btn" id="btn-inherits" onclick="toggleEdgeType('inherits','btn-inherits')">Inherits</button>
+      <button class="btn" id="btn-tests" onclick="toggleEdgeType('tests','btn-tests')">Tests</button>
+    </div>
+  </div>
   <div class="sep"></div>
   <button class="btn active" id="btn-hidetests" onclick="toggleTestFiles('btn-hidetests')" title="Make all test files invisible">Hide Tests</button>
   <div class="sep"></div>
@@ -447,6 +461,7 @@ g.node,path.vis{transition:opacity .16s ease}
     <button class="sp-x" onclick="closeMethodPanel()">✕</button>
   </div>
   <div id="mp-summary"></div>
+  <div id="mp-search-wrap"><input id="mp-search" type="text" placeholder="Search methods..." oninput="filterMethodPanel(this.value)"></div>
   <div id="mp-methods"></div>
 </div>
 
@@ -472,6 +487,7 @@ var currentSteps = [], currentMethodCalls = [];
 var chatPending = false;
 var chatEffort = 'medium';
 var overlayMethods = [], overlayCalls = [];
+var searchCameraBefore = null;
 var hiddenTypes = {calls:false, inherits:false, tests:false};
 var hideTests = true;
 var fx = {repel:1.2, linkDist:1.3, cluster:0.06};
@@ -703,6 +719,8 @@ function edgeClick(d){
 function backgroundClick(){
   selectedId=null; hoverLock=false;
   if(stepMode){ closePanel(true); document.getElementById('selected-info').textContent=''; return; }
+  closeViewMenu();
+  clearTopSearches(true);
   closeMethodPanel();
   resetCircleStrokes(); restoreView();
   document.getElementById('selected-info').textContent='';
@@ -710,14 +728,14 @@ function backgroundClick(){
 
 // ---- camera ----
 function fitAll(){fitTo(hideTests?rawNodes.filter(function(n){return !n.isTest;}):rawNodes,60);}
-function fitTo(nodes,pad){
+function fitTo(nodes,pad,maxScale){
   if(!nodes||!nodes.length) return;
   var minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9,any=false;
   nodes.forEach(function(n){if(n.x==null)return;any=true;var r=radius(n);minX=Math.min(minX,n.x-r);minY=Math.min(minY,n.y-r);maxX=Math.max(maxX,n.x+r);maxY=Math.max(maxY,n.y+r);});
   if(!any) return;
   pad=pad||60;
   var w=maxX-minX, h=maxY-minY; if(w<=0||h<=0) return;
-  var scale=Math.min(4,Math.max(0.12,0.92*Math.min(W()/(w+2*pad),H()/(h+2*pad))));
+  var scale=Math.min(maxScale||4,Math.max(0.12,0.92*Math.min(W()/(w+2*pad),H()/(h+2*pad))));
   var tx=W()/2-scale*(minX+maxX)/2, ty=H()/2-scale*(minY+maxY)/2;
   svg.transition().duration(450).call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
 }
@@ -734,6 +752,15 @@ function applyForces(){
 }
 function setFx(key,val,spanId){fx[key]=parseFloat(val);var s=document.getElementById(spanId);if(s)s.textContent=val;applyForces();}
 function toggleFx(){document.getElementById('fxpanel').classList.toggle('hidden');}
+function toggleViewMenu(e){
+  if(e) e.stopPropagation();
+  var m=document.getElementById('viewmenu');
+  if(m) m.classList.toggle('hidden');
+}
+function closeViewMenu(){
+  var m=document.getElementById('viewmenu');
+  if(m) m.classList.add('hidden');
+}
 function toggleEdgeType(type,btnId){
   hiddenTypes[type]=!hiddenTypes[type];
   var b=document.getElementById(btnId); if(b)b.classList.toggle('active',hiddenTypes[type]);
@@ -752,10 +779,28 @@ function toggleTestFiles(btnId){
   var b=document.getElementById(btnId); if(b)b.classList.toggle('active',hideTests);
   applyTestVisibility();
 }
+function rememberSearchCamera(){
+  if(!searchCameraBefore&&svg) searchCameraBefore=d3.zoomTransform(svg.node());
+}
+function restoreSearchCamera(){
+  if(!searchCameraBefore) return false;
+  var t=searchCameraBefore;
+  searchCameraBefore=null;
+  svg.transition().duration(350).call(zoom.transform,t);
+  return true;
+}
+function clearTopSearches(restoreCamera){
+  var fs=document.getElementById('search'), ms=document.getElementById('method-search');
+  if(fs) fs.value='';
+  if(ms) ms.value='';
+  if(restoreCamera) restoreSearchCamera();
+}
 function searchNodes(q){
   if(!nodeSel) return;
   q=(q||'').toLowerCase().trim();
-  if(!q){hoverLock=false;resetCircleStrokes();restoreView();fitAll();return;}
+  if(q){var ms=document.getElementById('method-search');if(ms)ms.value='';}
+  if(!q){hoverLock=false;resetCircleStrokes();restoreView();restoreSearchCamera();return;}
+  rememberSearchCamera();
   hoverLock=true; stepMode=false; closeMethodPanel();
   var keep={}, matches=[];
   rawNodes.forEach(function(n){if(n.label.toLowerCase().indexOf(q)>=0){keep[n.id]=1;matches.push(n);}});
@@ -763,11 +808,56 @@ function searchNodes(q){
   nodeSel.select('text').style('display',function(d){return keep[d.id]?'block':'none';}).style('opacity',1);
   nodeSel.select('circle').attr('stroke',function(d){return keep[d.id]?'#fff':(d.isTest?'#5fad65':'rgba(0,0,0,0.38)');}).attr('stroke-width',function(d){return keep[d.id]?3:1.5;});
   linkSel.select('path.vis').style('opacity',function(l){return (keep[l.source.id]&&keep[l.target.id])?edgeOpacity(l):0.03;});
-  if(matches.length) fitTo(matches,120);
+  if(matches.length) fitTo(matches,135,2.45);
 }
+
+function searchMethods(q){
+  if(!nodeSel) return;
+  q=(q||'').toLowerCase().trim();
+  if(q){var fs=document.getElementById('search');if(fs)fs.value='';}
+  if(!q){hoverLock=false;resetCircleStrokes();restoreView();restoreSearchCamera();document.getElementById('selected-info').textContent='';return;}
+  rememberSearchCamera();
+  hoverLock=true; stepMode=false; closeMethodPanel();
+  var keepNodes={}, keepLinks={}, frameNodes={}, matches=[], frameMatches=[];
+  rawLinks.forEach(function(l){
+    if(l.type!=='calls') return;
+    var calls=l.methodCalls||[];
+    for(var i=0;i<calls.length;i++){
+      var callerMatch=methodNameMatches(calls[i].callerMethod,q);
+      var targetMatch=methodNameMatches(calls[i].targetMethod,q);
+      if(callerMatch||targetMatch){
+        keepLinks[l.id]=1;
+        frameNodes[l.si]=1;
+        frameNodes[l.ti]=1;
+        if(callerMatch) keepNodes[l.si]=1;
+        if(targetMatch) keepNodes[l.ti]=1;
+      }
+    }
+  });
+  rawNodes.forEach(function(n){if(keepNodes[n.id])matches.push(n);});
+  rawNodes.forEach(function(n){if(frameNodes[n.id])frameMatches.push(n);});
+  nodeSel.style('opacity',function(d){return keepNodes[d.id]?1:0.07;});
+  nodeSel.select('text').style('display',function(d){return keepNodes[d.id]?'block':'none';}).style('opacity',1);
+  nodeSel.select('circle')
+    .attr('stroke',function(d){return keepNodes[d.id]?'#d6ae58':(d.isTest?'#5fad65':'rgba(0,0,0,0.38)');})
+    .attr('stroke-width',function(d){return keepNodes[d.id]?3:1.5;});
+  linkSel.select('path.vis').style('opacity',function(l){
+    if(hiddenTypes[l.type]) return 0;
+    return keepLinks[l.id]?0.96:0.03;
+  });
+  document.getElementById('selected-info').textContent=matches.length?('▶ method: '+q+' · '+matches.length+' files'):'No method matches';
+  if(frameMatches.length) fitTo(frameMatches,135,2.45);
+}
+
+function methodNameMatches(methodId,q){
+  methodId=methodId||'';
+  return methodLabel(methodId).toLowerCase().indexOf(q)>=0 || methodId.toLowerCase().indexOf(q)>=0;
+}
+
 function resetView(){
-  document.getElementById('search').value='';
+  clearTopSearches(false);
   selectedId=null; hoverLock=false; stepMode=false;
+  closeViewMenu();
   closeMethodPanel();
   document.getElementById('steppanel').classList.add('hidden');
   clearStepMethods();
@@ -783,10 +873,11 @@ function openMethodPanel(d){
   document.getElementById('methodpanel').classList.remove('hidden');
   document.getElementById('mp-title').textContent='File Calls';
   document.getElementById('mp-summary').textContent=label(d.source.id)+' → '+label(d.target.id)+' · '+currentMethodCalls.length+' method calls';
+  resetMethodSearch();
   var html='';
   currentMethodCalls.forEach(function(c){
     var caller=escapeAttr(c.callerMethod||''), target=escapeAttr(c.targetMethod||'');
-    html+='<div class="mp-call">'
+    html+='<div class="mp-call" data-search="'+escapeAttr(methodSearchText(c))+'">'
       +'<div class="mp-line"><span class="mp-method" ondblclick="navigateMethod(\''+caller+'\')" title="'+caller+'">'+escapeHtml(methodLabel(c.callerMethod))+'</span>'
       +'<span>→</span>'
       +'<span class="mp-method" ondblclick="navigateMethod(\''+target+'\')" title="'+target+'">'+escapeHtml(methodLabel(c.targetMethod))+'</span></div>'
@@ -796,7 +887,39 @@ function openMethodPanel(d){
   });
   document.getElementById('mp-methods').innerHTML=html||'<div class="sp-step-e">No method calls recorded.</div>';
 }
-function closeMethodPanel(){document.getElementById('methodpanel').classList.add('hidden');}
+function closeMethodPanel(){document.getElementById('methodpanel').classList.add('hidden');resetMethodSearch();}
+
+function resetMethodSearch(){
+  var input=document.getElementById('mp-search');
+  if(input) input.value='';
+}
+
+function methodSearchText(c){
+  return [
+    c.callerMethod||'', c.targetMethod||'',
+    methodLabel(c.callerMethod||''), methodLabel(c.targetMethod||'')
+  ].join(' ').toLowerCase();
+}
+
+function filterMethodPanel(q){
+  q=(q||'').toLowerCase().trim();
+  var calls=document.querySelectorAll('#mp-methods .mp-call');
+  for(var i=0;i<calls.length;i++){
+    var show=!q||(calls[i].getAttribute('data-search')||'').indexOf(q)>=0;
+    calls[i].style.display=show?'':'none';
+  }
+  var groups=document.querySelectorAll('#mp-methods .mp-group');
+  for(var g=0;g<groups.length;g++){
+    var visible=0, chips=groups[g].querySelectorAll('.mp-chip');
+    for(var c=0;c<chips.length;c++){
+      var text=(chips[c].getAttribute('data-search')||chips[c].getAttribute('title')||'').toLowerCase();
+      var keep=!q||text.indexOf(q)>=0;
+      chips[c].style.display=keep?'':'none';
+      if(keep) visible++;
+    }
+    groups[g].style.display=visible?'':'none';
+  }
+}
 
 // ---- node panel (file node -> every method call, grouped by the other file) ----
 // Clicking a method on a chip reveals its connection in the graph and opens the method in the editor (no AI).
@@ -830,6 +953,7 @@ function renderGroupPanel(titleText,labelText,emptyMsg,arr){
   document.getElementById('steppanel').classList.add('hidden');
   document.getElementById('methodpanel').classList.remove('hidden');
   document.getElementById('mp-title').textContent=titleText;
+  resetMethodSearch();
   if(!arr.length){
     document.getElementById('mp-summary').textContent=labelText+' · no connections';
     document.getElementById('mp-methods').innerHTML='<div class="sp-step-e">'+escapeHtml(emptyMsg)+'</div>';
@@ -998,7 +1122,7 @@ function playStep(i){
   }
   applyStepHighlight(uF,uM,cF,cM,s.focusMethod);
   var fn=[]; Object.keys(uF).forEach(function(id){if(nodeById[id])fn.push(nodeById[id]);});
-  fitTo(fn.length?fn:rawNodes,110);
+  fitTo(fn.length?fn:rawNodes,170,2.0);
 }
 
 function showAllSteps(){
@@ -1010,7 +1134,7 @@ function showAllSteps(){
     if(s.focusMethod){uM[s.focusMethod]=1;cM[s.focusMethod]=c;}});
   applyStepHighlight(uF,uM,cF,cM,null);
   var fn=[]; Object.keys(uF).forEach(function(id){if(nodeById[id])fn.push(nodeById[id]);});
-  fitTo(fn.length?fn:rawNodes,90);
+  fitTo(fn.length?fn:rawNodes,150,2.0);
   var items=document.querySelectorAll('.sp-step');
   for(var k=0;k<items.length;k++) items[k].classList.remove('active');
 }
