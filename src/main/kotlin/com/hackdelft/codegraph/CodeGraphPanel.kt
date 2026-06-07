@@ -62,9 +62,9 @@ class CodeGraphPanel(private val project: Project) {
     component.add(browser.component, BorderLayout.CENTER)
   }
 
-  fun focusNode(nodeId: String) {
-    val escaped = (graphNodeId(nodeId) ?: nodeId).e()
-    browser.cefBrowser.executeJavaScript("focusNode(\"$escaped\");", "", 0)
+  /** Open in Graph View: reveal a single method's connections (both directions) in the graph. */
+  fun openMethodInGraph(methodId: String) {
+    browser.cefBrowser.executeJavaScript("openMethodConnections(\"${methodId.e()}\");", "", 0)
   }
 
   fun refreshGraph(force: Boolean = false) {
@@ -79,6 +79,8 @@ class CodeGraphPanel(private val project: Project) {
 
   /** Flow 2/3: build a focused subgraph around [nodeId], ask the AI for typed steps, push to the UI. */
   fun explainNode(nodeId: String) {
+    // Show the loading panel right away so the editor-triggered flow gives instant feedback during the long AI call.
+    browser.cefBrowser.executeJavaScript("openPanelLoading();", "", 0)
     bg.submit {
       try {
         val full = currentGraph ?: extractAndCache().also { currentGraph = it }
@@ -237,11 +239,6 @@ class CodeGraphPanel(private val project: Project) {
       """{"data":{"id":"e$i","source":"${e.source.e()}","target":"${e.target.e()}","type":"${e.type}","color":"${e.color}","methodCalls":[$calls]}}"""
     }.joinToString(",")
     return """{"nodes":[$nodes],"edges":[$edges]}"""
-  }
-
-  private fun graphNodeId(nodeId: String): String? {
-    if (nodeId.startsWith("file:")) return nodeId
-    return methodFilePath(nodeId)?.let { "file:$it" }
   }
 
   private fun methodFilePath(nodeId: String): String? =
@@ -599,6 +596,7 @@ function resetCircleStrokes(){
 
 function nodeClick(d){
   selectedId=d.id; hoverLock=true; stepMode=false;
+  clearStepMethods();
   hoverNode(d);
   resetCircleStrokes();
   nodeSel.filter(function(n){return n.id===d.id;}).select('circle').attr('stroke','#fff').attr('stroke-width',3);
@@ -609,6 +607,7 @@ function nodeClick(d){
 
 function edgeClick(d){
   selectedId=null; hoverLock=true; stepMode=false;
+  clearStepMethods();
   var keep={}; keep[d.source.id]=1; keep[d.target.id]=1;
   nodeSel.style('opacity',function(n){return keep[n.id]?1:0.10;});
   nodeSel.select('text').style('display',function(n){return keep[n.id]?'block':'none';}).style('opacity',1);
@@ -623,7 +622,7 @@ function edgeClick(d){
 
 function backgroundClick(){
   selectedId=null; hoverLock=false;
-  if(stepMode) return;
+  if(stepMode){ closePanel(true); document.getElementById('selected-info').textContent=''; return; }
   closeMethodPanel();
   resetCircleStrokes(); restoreView();
   document.getElementById('selected-info').textContent='';
@@ -641,19 +640,6 @@ function fitTo(nodes,pad){
   var scale=Math.min(4,Math.max(0.12,0.92*Math.min(W()/(w+2*pad),H()/(h+2*pad))));
   var tx=W()/2-scale*(minX+maxX)/2, ty=H()/2-scale*(minY+maxY)/2;
   svg.transition().duration(450).call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
-}
-
-function focusNode(id){
-  var d=nodeById[id];
-  if(!d){return;}
-  if(d.x==null){setTimeout(function(){focusNode(id);},320);return;}
-  selectedId=id; hoverLock=true; stepMode=false;
-  hoverNode(d);
-  resetCircleStrokes();
-  nodeSel.filter(function(n){return n.id===id;}).select('circle').attr('stroke','#fff').attr('stroke-width',3);
-  var neigh=[d]; adj[id].forEach(function(nid){if(nodeById[nid])neigh.push(nodeById[nid]);});
-  fitTo(neigh,90);
-  document.getElementById('selected-info').textContent='▶ '+d.label;
 }
 
 // ---- toolbar ----
@@ -746,10 +732,32 @@ function nodeChip(c,defined){
     +'<span class="mp-cm" onclick="revealMethod(\''+tm+'\',\''+cm+'\',\''+tm+'\')">'+escapeHtml(methodLabel(c.targetMethod))+'</span>'
     +'</span>';
 }
-function openNodePanel(d){
+function groupArr(groups){
+  return Object.keys(groups).map(function(id){var g=groups[id];return {id:id,out:g.out,inc:g.inc,n:g.out.length+g.inc.length};});
+}
+// Shared grouped-connection panel: groups sorted by size; per group, outgoing/defined chips (accented) then incoming.
+function renderGroupPanel(titleText,labelText,emptyMsg,arr){
   document.getElementById('steppanel').classList.add('hidden');
   document.getElementById('methodpanel').classList.remove('hidden');
-  document.getElementById('mp-title').textContent=d.label;
+  document.getElementById('mp-title').textContent=titleText;
+  if(!arr.length){
+    document.getElementById('mp-summary').textContent=labelText+' · no connections';
+    document.getElementById('mp-methods').innerHTML='<div class="sp-step-e">'+escapeHtml(emptyMsg)+'</div>';
+    return;
+  }
+  arr.sort(function(a,b){return b.n-a.n;});
+  var total=arr.reduce(function(s,g){return s+g.n;},0);
+  document.getElementById('mp-summary').textContent=labelText+' · '+arr.length+' files · '+total+' calls';
+  var html='';
+  arr.forEach(function(g){
+    html+='<div class="mp-group"><div class="mp-group-h" title="'+escapeAttr(label(g.id))+'">'+escapeHtml(label(g.id))+' <span class="mp-count">'+g.n+'</span></div><div class="mp-chips">';
+    g.out.forEach(function(c){html+=nodeChip(c,true);});
+    g.inc.forEach(function(c){html+=nodeChip(c,false);});
+    html+='</div></div>';
+  });
+  document.getElementById('mp-methods').innerHTML=html;
+}
+function openNodePanel(d){
   var groups={};
   rawLinks.forEach(function(l){
     if(l.type!=='calls') return;
@@ -758,24 +766,38 @@ function openNodePanel(d){
     var g=groups[other]||(groups[other]={out:[],inc:[]});
     (l.methodCalls||[]).forEach(function(c){(outgoing?g.out:g.inc).push(c);});
   });
-  var arr=Object.keys(groups).map(function(id){var g=groups[id];return {id:id,out:g.out,inc:g.inc,n:g.out.length+g.inc.length};});
-  if(!arr.length){
-    document.getElementById('mp-summary').textContent=d.label+' · no method calls';
-    document.getElementById('mp-methods').innerHTML='<div class="sp-step-e">This file has no recorded method-call connections.</div>';
-    return;
-  }
-  arr.sort(function(a,b){return b.n-a.n;});
-  var total=arr.reduce(function(s,g){return s+g.n;},0);
-  document.getElementById('mp-summary').textContent=d.label+' · '+arr.length+' files · '+total+' calls';
-  var html='';
-  arr.forEach(function(g){
-    html+='<div class="mp-group"><div class="mp-group-h" title="'+escapeAttr(label(g.id))+'">'+escapeHtml(label(g.id))+' <span class="mp-count">'+g.n+'</span></div><div class="mp-chips">';
-    // Group file's methods first: outgoing (clicked file -> group file) calls target a method defined in the group file.
-    g.out.forEach(function(c){html+=nodeChip(c,true);});
-    g.inc.forEach(function(c){html+=nodeChip(c,false);});
-    html+='</div></div>';
+  renderGroupPanel(d.label,d.label,'This file has no recorded method-call connections.',groupArr(groups));
+}
+// Open in Graph View: one function's connections — methods it calls (outgoing) + methods that call it (incoming).
+function openMethodConnections(mid){
+  if(!rawNodes.length){setTimeout(function(){openMethodConnections(mid);},320);return;}
+  hoverLock=true; stepMode=false; selectedId=null;
+  clearStepMethods();
+  var groups={}, edgeIds={}, fileIds={};
+  rawLinks.forEach(function(l){
+    if(l.type!=='calls') return;
+    (l.methodCalls||[]).forEach(function(c){
+      var isOut=c.callerMethod===mid, isIn=c.targetMethod===mid;
+      if(!isOut&&!isIn) return;
+      var other=isOut?l.ti:l.si;
+      var g=groups[other]||(groups[other]={out:[],inc:[]});
+      (isOut?g.out:g.inc).push(c);
+      edgeIds[l.id]=1; fileIds[l.si]=1; fileIds[l.ti]=1;
+    });
   });
-  document.getElementById('mp-methods').innerHTML=html;
+  var arr=groupArr(groups);
+  renderGroupPanel(methodLabel(mid),methodLabel(mid),'This function has no recorded cross-file connections.',arr);
+  document.getElementById('selected-info').textContent='▶ '+methodLabel(mid);
+  if(arr.length){
+    resetCircleStrokes();
+    nodeSel.style('opacity',function(n){return fileIds[n.id]?1:0.08;});
+    nodeSel.select('text').style('display',function(n){return fileIds[n.id]?'block':'none';}).style('opacity',1);
+    linkSel.select('path.vis').style('opacity',function(l){return edgeIds[l.id]?0.95:0.04;});
+    var fn=[]; Object.keys(fileIds).forEach(function(id){if(nodeById[id])fn.push(nodeById[id]);});
+    fitTo(fn,110);
+  } else {
+    restoreView();
+  }
 }
 
 // ---- AI explain: steps + method overlay ----
@@ -863,13 +885,13 @@ function pulseOverlay(id){
   sel.transition().duration(320).attr('r',21).transition().duration(320).attr('r',15);
 }
 
-function closePanel(){
+function closePanel(skipFit){
   document.getElementById('steppanel').classList.add('hidden');
   stepMode=false; hoverLock=false;
   clearStepMethods();
   resetCircleStrokes();
   restoreView();
-  fitAll();
+  if(!skipFit) fitAll();
 }
 
 // ---- method overlay (clustered method nodes around their file, step view only) ----
