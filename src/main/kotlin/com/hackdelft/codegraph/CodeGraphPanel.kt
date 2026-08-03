@@ -489,7 +489,7 @@ var graphEl, svg, viewport, gLinks, gNodes, gOverlay, sim, zoom;
 var curK = 1;
 var rawNodes = [], rawLinks = [], nodeById = {}, adj = {}, folderAngle = {};
 var nodeSel = null, linkSel = null;
-var selectedId = null, hoverLock = false, stepMode = false;
+var selectedId = null, hoverLock = false, stepMode = false, dragging = false;
 var currentSteps = [], currentMethodCalls = [];
 var chatPending = false;
 var chatEffort = 'medium';
@@ -523,6 +523,7 @@ function H(){return graphEl.clientHeight||600;}
 function sizeSvg(){svg.attr('width',W()).attr('height',H());}
 
 function init(){
+  if(typeof d3==='undefined'){setTimeout(init,50);return;}
   graphEl = document.getElementById('graph-wrap');
   svg = d3.select('#graph');
   buildDefs();
@@ -554,6 +555,7 @@ function buildDefs(){
 
 // ---- data load ----
 function updateGraph(d){
+  if(!svg){setTimeout(function(){updateGraph(d);},50);return;}
   var incoming = (d.nodes||[]).map(function(n){return n.data;});
   var ids = {}; incoming.forEach(function(n){ids[n.id]=1;});
   var inLinks = (d.edges||[]).map(function(e){return e.data;}).filter(function(e){return ids[e.source]&&ids[e.target];});
@@ -561,8 +563,13 @@ function updateGraph(d){
   var prev = nodeById;
   rawNodes = incoming.map(function(n){
     var o = prev[n.id]||{};
+    // Seed brand-new nodes near the viewport center (jittered) instead of d3's default near-origin spiral,
+    // so the initial settle is a gentle drift rather than a long fly-in that leaves repaint artifacts on CEF.
+    var hasPos = o.x!=null && o.y!=null;
+    var sx = hasPos?o.x:(W()/2+(Math.random()-0.5)*60);
+    var sy = hasPos?o.y:(H()/2+(Math.random()-0.5)*60);
     return {id:n.id,label:n.label,type:n.type,folder:n.folder||'.',color:n.color||'#548af7',isTest:!!n.isTest,
-            x:o.x,y:o.y,vx:o.vx,vy:o.vy};
+            x:sx,y:sy,vx:o.vx,vy:o.vy};
   });
   nodeById = {}; rawNodes.forEach(function(n){nodeById[n.id]=n;});
 
@@ -594,7 +601,8 @@ function buildSim(){
     .force('radial', d3.forceRadial(Math.min(W(),H()) * 0.35, W()/2, H()/2).strength(fx.cluster))
 
     .velocityDecay(0.30).alpha(0.9).alphaDecay(0.024)
-    .on('tick', ticked);
+    .on('tick', ticked)
+    .on('end', forceRepaint);
 }
 
 function linkWidth(l){
@@ -626,8 +634,8 @@ function draw(){
   var nent = nsel.enter().append('g').attr('class','node').style('cursor','pointer')
     .call(makeDrag())
     .on('click',function(e,d){e.stopPropagation();nodeClick(d);})
-    .on('mouseover',function(e,d){if(!stepMode&&!hoverLock)hoverNode(d);})
-    .on('mouseout',function(){if(!stepMode&&!hoverLock)restoreView();});
+    .on('mouseover',function(e,d){if(!stepMode&&!hoverLock&&!dragging)hoverNode(d);})
+    .on('mouseout',function(){if(!stepMode&&!hoverLock&&!dragging)restoreView();});
   nent.append('circle');
   nent.append('text').attr('text-anchor','middle').attr('class','nlabel');
   nodeSel = nent.merge(nsel);
@@ -658,11 +666,19 @@ function linkPath(d){
   return 'M'+x1+','+y1+'Q'+mx+','+my+' '+x2+','+y2;
 }
 
+function forceRepaint(){
+  // Some CEF builds leave stale pixels behind fast-moving SVG transforms; a display toggle forces a full repaint.
+  if(!graphEl) return;
+  graphEl.style.display='none';
+  void graphEl.offsetHeight;
+  graphEl.style.display='';
+}
+
 function makeDrag(){
   return d3.drag().container(function(){return gNodes.node();})
-    .on('start',function(e,d){if(!e.active)sim.alphaTarget(0.2).restart();d.fx=e.x;d.fy=e.y;})
+    .on('start',function(e,d){dragging=true;if(!e.active)sim.alphaTarget(0.2).restart();d.fx=e.x;d.fy=e.y;})
     .on('drag',function(e,d){d.fx=e.x;d.fy=e.y;})
-    .on('end',function(e,d){if(!e.active)sim.alphaTarget(0);d.fx=null;d.fy=null;});
+    .on('end',function(e,d){dragging=false;if(!e.active)sim.alphaTarget(0);d.fx=null;d.fy=null;if(!stepMode&&!hoverLock)restoreView();forceRepaint();});
 }
 
 // ---- labels by zoom + importance ----
